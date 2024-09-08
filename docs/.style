@@ -1,0 +1,9 @@
+This file describes the style that all the .rst document should follow.
+
+Headings:
+###### ********
+Part   Chapter  Section  Subsec  Subsub  Para
+###### ******** ======== ------- ^^^^^^^ """"""""
+case:
+Part: All Capital
+Others: First capital

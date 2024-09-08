@@ -1,0 +1,10 @@
+# ide directory
+.idea/
+
+# built artifacts, no matter code or doc
+dist/
+docs/_build/
+src/dnois.egg-info/
+
+# sphinx autosummary stub
+docs/content/ref/_stub/

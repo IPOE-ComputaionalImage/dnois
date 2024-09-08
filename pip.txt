@@ -1,0 +1,5 @@
+furo
+matplotlib
+notebook
+sphinx
+torch
