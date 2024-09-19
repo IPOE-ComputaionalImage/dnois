@@ -23,6 +23,7 @@ extensions = [
     'sphinx.ext.autosummary',
     'sphinx.ext.doctest',
     'sphinx.ext.duration',
+    'sphinx.ext.githubpages',
     'sphinx.ext.mathjax',
 ]
 

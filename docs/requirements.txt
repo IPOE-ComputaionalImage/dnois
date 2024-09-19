@@ -1,3 +1,4 @@
 furo==2024.8.6
-sphinx
+numpy==1.26.4
+sphinx==8.0.2
 torch==2.4.0
