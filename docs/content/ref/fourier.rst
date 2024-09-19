@@ -35,3 +35,5 @@ TODO: other conv functions
 
     conv1
     conv2
+    lconv1
+    lconv2

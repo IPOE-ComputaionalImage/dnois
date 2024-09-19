@@ -30,7 +30,7 @@ import warnings
 import torch
 import torch.fft as _fft
 
-from dnois.utils.typing import Size2d, Ts, Spacing, size2d
+from dnois.base.typing import Size2d, Ts, Spacing, ConvOut, size2d
 
 from ._utils import _check_dim, _mul, _pad, _pad_in_dims
 
@@ -40,7 +40,156 @@ __all__ = [
     'conv2_mult',
     'conv2_partial',
     'init_conv2',
+    'lconv1',
+    'lconv2',
 ]
+
+
+def _dtm_real(f1: Ts, f2: Ts, real: bool) -> bool:
+    rfft_applicable = not (f1.is_complex() or f2.is_complex())
+    if real is None:
+        return rfft_applicable
+    elif real and not rfft_applicable:
+        warnings.warn(f'Either f1 or f2 is complex but real=True given')
+        return False
+    else:
+        return False
+
+
+def _tail_pad(f: Ts, dims: tuple[int, ...], paddings: tuple[int, ...]) -> Ts:
+    for dim, padding in zip(dims, paddings):
+        shape = list(f.shape)
+        shape[dim] = padding
+        f = torch.cat((f, f.new_zeros(shape)), dim=dim)
+    return f
+
+
+def lconv1(
+    f1: Ts,
+    f2: Ts,
+    dim: int = -1,
+    out: ConvOut = 'full',
+    real: bool = None,
+) -> Ts:
+    r"""
+    Computes 1D linear convolution for two sequences :math:`f_1` and :math:`f_2`,
+    implemented by FFT and appropriate padding is applied automatically
+    to avoid circular convolution.
+
+    This function is similar to |scipy_signal_fftconvolve|_ in 1D case.
+
+    :param Tensor f1: The first sequence :math:`f_1` with length ``N`` in dimension ``dim``.
+    :param Tensor f2: The second sequence :math:`f_2` with length ``M`` in dimension ``dim``.
+    :param int dim: The dimension to be transformed. Default: -1.
+    :param str out: One of the following options. Default: ``full``.
+
+        ``full``
+            Return complete result so the size of dimension ``dim`` is :math:`N+M-1`.
+
+        ``same``
+            Return the middle segment of result. In other words, drop the first
+            ``min(N, M) // 2`` elements and the last ``(min(N, M) - 1) // 2`` elements
+            so the size of dimension ``dim`` is :math:`\max(N, M)`.
+
+        ``valid``
+            Return only the segments where ``f1`` and ``f2`` overlap completely so
+            the size of dimension ``dim`` is :math:`\max(N,M)-\min(N,M)+1`.
+    :param bool real: If both ``f1`` and ``f2`` are real-valued and ``real`` is ``True``,
+        :py:func:`torch.fft.rfft` can be used to improve computation and a real-valued
+        tensor will be returned. If either ``f1`` or ``f2`` is complex or `real=False`,
+        a complex tensor will be returned.
+        Default: depending on the dtype of ``f1`` and ``f2``.
+    :return: Convolution between ``f1`` and ``f2``. Complex if either ``f1`` or ``f2`` is
+        complex or ``real=False``, real-valued otherwise.
+    :rtype: Tensor
+
+    .. |scipy_signal_fftconvolve| replace:: scipy.signal.fftconvolve
+    .. _scipy_signal_fftconvolve: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.fftconvolve.html#scipy.signal.fftconvolve
+    """
+    real = _dtm_real(f1, f2, real)
+    n, m = f1.size(dim), f2.size(dim)
+    min_l, max_l = min(n, m), max(n, m)
+    sl = m + n - 1
+
+    if real:
+        g: Ts = _fft.irfft(_fft.rfft(f1, sl, dim) * _fft.rfft(f2, sl, dim), sl, dim)
+    else:
+        g: Ts = _fft.ifft(_fft.fft(f1, sl, dim) * _fft.fft(f2, sl, dim), sl, dim)
+
+    if out == 'full':
+        return g
+    elif out == 'same':
+        return g.narrow(dim, min_l // 2, max_l)
+    elif out == 'valid':
+        return g.narrow(dim, min_l - 1, max_l - min_l + 1)
+    else:
+        raise ValueError(f'Unknown output type: {out}')
+
+
+def lconv2(
+    f1: Ts,
+    f2: Ts,
+    dims: tuple[int, int] = (-2, -1),
+    out: ConvOut = 'full',
+    real: bool = None,
+) -> Ts:
+    r"""
+    Computes 2D linear convolution for two 2D arrays :math:`f_1` and :math:`f_2`,
+    implemented by FFT and appropriate padding is applied automatically
+    to avoid circular convolution.
+
+    This function is similar to |scipy_signal_fftconvolve|_ in 2D case.
+
+    :param Tensor f1: The first array :math:`f_1` with size ``N1, N2`` in dimension ``dims``.
+    :param Tensor f2: The second array :math:`f_2` with size ``M1, M2`` in dimension ``dims``.
+    :param dims: The dimensions to be transformed. Default: ``(-2,-1)``.
+    :type dims: tuple[int, int]
+    :param str out: One of the following options. Default: ``full``. In each dimension:
+
+        ``full``
+            Return complete result so the size of each ``dims`` is :math:`N+M-1`.
+
+        ``same``
+            Return the middle segment of result. In other words, drop the first
+            ``min(N, M) // 2`` elements and the last ``(min(N, M) - 1) // 2`` elements
+            so the size of each ``dims`` is :math:`\max(N, M)`.
+
+        ``valid``
+            Return only the segments where ``f1`` and ``f2`` overlap completely so
+            the size of each ``dims`` is :math:`\max(N,M)-\min(N,M)+1`.
+    :param bool real: If both ``f1`` and ``f2`` are real-valued and ``real`` is ``True``,
+        :py:func:`torch.fft.rfft` can be used to improve computation and a real-valued
+        tensor will be returned. If either ``f1`` or ``f2`` is complex or `real=False`,
+        a complex tensor will be returned.
+        Default: depending on the dtype of ``f1`` and ``f2``.
+    :return: Convolution between ``f1`` and ``f2``. Complex if either ``f1`` or ``f2`` is
+        complex or ``real=False``, real-valued otherwise.
+    :rtype: Tensor
+
+    .. |scipy_signal_fftconvolve| replace:: scipy.signal.fftconvolve
+    .. _scipy_signal_fftconvolve: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.fftconvolve.html#scipy.signal.fftconvolve
+
+    """
+    real = _dtm_real(f1, f2, real)
+    (n1, n2), (m1, m2) = (f1.size(dims[0]), f1.size(dims[1])), (f2.size(dims[0]), f2.size(dims[1]))
+    min_l1, min_l2, max_l1, max_l2 = min(n1, m1), min(n2, m2), max(n1, m2), max(n1, m2)
+    sl = (n1 + m1 - 1, n2 + m2 - 1)
+
+    if real:
+        g: Ts = _fft.irfft2(_fft.rfft2(f1, sl, dims) * _fft.rfft2(f2, sl, dims), sl, dims)
+    else:
+        g: Ts = _fft.ifft2(_fft.fft2(f1, sl, dims) * _fft.fft2(f2, sl, dims), sl, dims)
+
+    if out == 'full':
+        return g
+    elif out == 'same':
+        return g.narrow(dims[0], min_l1 // 2, max_l1).narrow(dims[1], min_l2 // 2, max_l2)
+    elif out == 'valid':
+        g = g.narrow(dims[0], min_l1 - 1, max_l1 - min_l1 + 1)
+        g = g.narrow(dims[1], min_l2 - 1, max_l2 - min_l2 + 1)
+        return g
+    else:
+        raise ValueError(f'Unknown output type: {out}')
 
 
 def conv1(
@@ -60,10 +209,12 @@ def conv1(
         with ``f`` and ``g``. Omitted if ``None`` (default).
     :type: float or Tensor
     :param int dim: The dimension to be transformed. Default: -1.
-    :param int or str pad: Padding width at both ends of ``f`` and ``g``.
-        ``f`` and ``g`` are periodically
-        replicated during DFT-based convolution without padding, which is eliminated if they
-        are padded to double of the original lengths. Default: 0.
+    :param pad: Padding width at both ends of ``f`` and ``g``. ``pad`` can be set to
+        an integer ranging from 0 to the size of dimension
+        (or equivalently, a str ``full``) ``dim`` to mitigate
+        aliasing artifact caused by FFT. It computes circular convolution when
+        ``pad`` is 0 and linear convolution when ``pad`` is ``full``.
+    :type pad: int or str
     :param bool real: If both ``f`` and ``g`` are real-valued and ``real`` is ``True``,
         :py:func:`torch.fft.rfft` can be used to improve computation and a real-valued
         tensor will be returned. If either ``f`` or ``g`` is complex or `real=False`,
@@ -75,17 +226,11 @@ def conv1(
     """
     _check_dim('f', f.shape, (dim,), delta=dx)
     sl = f.size(dim)
+    real = _dtm_real(f, g, real)
     if pad == 'full':
-        pad = sl
+        pad = sl // 2
     if pad != 0:  # pad
         f, g = _pad_in_dims((dim,), (pad, pad), f, g)
-
-    rfft_applicable = not (f.is_complex() or g.is_complex())
-    if real is None:
-        real = rfft_applicable
-    elif real and not rfft_applicable:
-        warnings.warn(f'Either f or g is complex but real=True given')
-        real = False
 
     f, g = _fft.ifftshift(f, dim), _fft.ifftshift(g, dim)
     if real:
@@ -97,24 +242,6 @@ def conv1(
     if pad != 0:
         c = torch.narrow(c, dim, pad, sl)  # crop to original size
     return _mul(c, dx)
-
-
-def init_conv2(g: Ts, dims: tuple[int, int] = (-2, -1), pad: Size2d = 0, real: bool = None) -> Ts:
-    pad = size2d(pad)
-    if pad != (0, 0):
-        g = _pad(g, dims, (pad[1], pad[1], pad[0], pad[0]))
-
-    rfft_applicable = g.is_complex()
-    if real is None:
-        real = rfft_applicable
-    elif real and not rfft_applicable:
-        warnings.warn(f'g is complex but real=True given')
-        real = False
-    g = _fft.ifftshift(g, dims)
-    if real:
-        return _fft.rfft(g, dim=dims)
-    else:
-        return _fft.fft(g, dim=dims)
 
 
 def conv2(
@@ -140,9 +267,12 @@ def conv2(
     :type: float or Tensor
     :param dims: The dimensions to be transformed. Default: (-2, -1).
     :type: tuple[int, int] or str
-    :param int pad: Padding width at all four edges of ``f`` and ``g``. ``f`` and ``g`` are periodically
-        replicated during DFT-based convolution without padding, which is eliminated if they
-        are padded to double of the original widths. Default: 0.
+    :param pad: Padding width at both ends of ``f`` and ``g``. ``pad`` can be set to
+        an integer ranging from 0 to the size of dimension
+        (or equivalently, a str ``full``) ``dim`` to mitigate
+        aliasing artifact caused by FFT. It computes circular convolution when
+        ``pad`` is 0 and linear convolution when ``pad`` is ``full``.
+    :type pad: int or str
     :param bool real: If both ``f`` and ``g`` are real-valued and ``real`` is ``True``,
         :py:func:`torch.fft.rfft2` can be used to improve computation and a real-valued
         tensor will be returned. If either ``f`` or ``g`` is complex or `real=False`,
@@ -154,19 +284,13 @@ def conv2(
     """
     _check_dim('f', f.shape, dims, dx=dx, dy=dy)
     sl = f.size(dims[0]), f.size(dims[1])
+    real = _dtm_real(f, g, real)
     if pad == 'full':
-        pad = sl
+        pad = (sl[0] // 2, sl[1] // 2)
     pad = size2d(pad)
     if pad != (0, 0):
         f = _pad(f, dims, (pad[1], pad[1], pad[0], pad[0]))
         g = _pad(g, dims, (pad[1], pad[1], pad[0], pad[0]))
-
-    rfft_applicable = not (f.is_complex() or g.is_complex())
-    if real is None:
-        real = rfft_applicable
-    elif real and not rfft_applicable:
-        warnings.warn(f'Either f or g is complex but real=True given')
-        real = False
 
     f, g = _fft.ifftshift(f, dims), _fft.ifftshift(g, dims)
     if real:
@@ -179,6 +303,24 @@ def conv2(
         for dim, pad_, sl_ in zip(dims, pad, sl):
             c = torch.narrow(c, dim, pad_, sl_)
     return _mul(c, dx, dy)
+
+
+def init_conv2(g: Ts, dims: tuple[int, int] = (-2, -1), pad: Size2d = 0, real: bool = None) -> Ts:
+    pad = size2d(pad)
+    if pad != (0, 0):
+        g = _pad(g, dims, (pad[1], pad[1], pad[0], pad[0]))
+
+    rfft_applicable = g.is_complex()
+    if real is None:
+        real = rfft_applicable
+    elif real and not rfft_applicable:
+        warnings.warn(f'g is complex but real=True given')
+        real = False
+    g = _fft.ifftshift(g, dims)
+    if real:
+        return _fft.rfft(g, dim=dims)
+    else:
+        return _fft.fft(g, dim=dims)
 
 
 def conv2_mult(

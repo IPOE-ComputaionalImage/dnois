@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from dnois.utils.typing import Size2d, Literal, Ts, size2d
+from dnois.base.typing import Size2d, Literal, Ts, size2d
 
 from .noise import gaussian
 

@@ -1,6 +1,6 @@
 import torch
 
-from .typing import Ts, Sequence, cast, is_scalar
+from dnois.base.typing import Ts, Sequence, is_scalar
 
 __all__ = [
     'sym_interval',

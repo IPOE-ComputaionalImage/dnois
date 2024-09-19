@@ -1,3 +1,5 @@
+{% set excluded = inherited_members | list + ["__init__", "training"] %}
+
 #############################################
 {{ fullname | escape }}
 #############################################

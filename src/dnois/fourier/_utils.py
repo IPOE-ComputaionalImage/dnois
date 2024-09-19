@@ -1,7 +1,7 @@
 import torch
 from torch.nn import functional
 
-from dnois.utils.typing import Ts, Spacing
+from dnois.base.typing import Ts, Spacing
 
 
 def _check_dim(name: str, shape: torch.Size, dims: tuple[int, ...], **deltas: Spacing):

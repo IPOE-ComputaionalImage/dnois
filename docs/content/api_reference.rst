@@ -16,5 +16,6 @@ TODO: description of this page
 
     ref/fourier
     ref/mt
+    ref/optics
     ref/sensor
     ref/utils

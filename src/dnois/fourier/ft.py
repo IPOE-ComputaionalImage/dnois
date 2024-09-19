@@ -44,7 +44,7 @@ True
 import torch
 import torch.fft as _fft
 
-from dnois.utils.typing import Ts, Spacing
+from dnois.base.typing import Ts, Spacing
 
 from ._utils import _check_dim, _div, _mul
 

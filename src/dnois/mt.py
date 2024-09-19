@@ -9,23 +9,24 @@ to compute the refractive index for given wavelength. Each class implements
 this method by its own dispersion formula.
 """
 # TODO: declare source: Zemax manual
-# TODO: CRUD functions
 
 import abc
 
 import torch
 
-from dnois.utils.typing import Numeric, Union, cast
+from dnois.base.typing import Numeric, Union, cast
 
 __all__ = [
-    # 'get',
-    # 'is_available',
-    # 'list_all',
-    # 'refractive_index',
-    # 'register',
+    'get',
+    'is_available',
+    'list_all',
+    'refractive_index',
+    'register',
+    'remove',
 
     'Cauchy',
     'Conrady',
+    'Constant',
     'Herzberger',
     'Material',
     'Schott',
@@ -38,7 +39,6 @@ __all__ = [
 
 _PRINT_PRECISION = 3
 
-_lib = {}
 _units = {
     'm': 1,
     'dm': 1e-1,
@@ -127,6 +127,32 @@ class Material(metaclass=abc.ABCMeta):
             return wl
 
 
+class Constant(Material):
+    """
+    Material with constant optical properties.
+
+    :param float n: Constant refractive index.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        n: float,
+        min_wl: float = None,
+        max_wl: float = None,
+        default_unit: str = 'm'
+    ):
+        super().__init__(name, min_wl, max_wl, default_unit)
+        self.refractive_index: float = n  #: Refractive index.
+
+    def _repr(self, precision: int) -> str:
+        return f'n={self.refractive_index:.{precision}f}'
+
+    def n(self, wl: Numeric, unit: str = None) -> Numeric:
+        n = self.refractive_index
+        return torch.full_like(wl, n) if torch.is_tensor(wl) else n
+
+
 class Cauchy(Material):
     r"""
     The material class for which Cauchy formula is applicable:
@@ -181,7 +207,7 @@ class Schott(Material):
 
         if len(coefficients) != 6:
             raise ValueError(f'Number of coefficients in Schott formula must be 6.')
-        self.coefficients = coefficients  #:The six coefficients in Schott formula.
+        self.coefficients = coefficients  #: The six coefficients in Schott formula.
 
     def n(self, wl: Numeric, unit: str = None) -> Numeric:
         wl = self._validate(wl, unit)
@@ -209,8 +235,8 @@ class _Sellmeier(Material):
 
         if len(ks) != self._n_terms or len(ls) != self._n_terms:
             raise ValueError(f'Numbers of K and L coefficients should be equal to {self._n_terms}.')
-        self.ks = ks  #:The coefficients :math:`K_i` s in Sellmeier{num} formula.
-        self.ls = ls  #:The coefficients :math:`L_i` s in Sellmeier{num} formula.
+        self.ks = ks  #: The coefficients :math:`K_i` s in Sellmeier{num} formula.
+        self.ls = ls  #: The coefficients :math:`L_i` s in Sellmeier{num} formula.
 
     def n(self, wl: Numeric, unit: str = None) -> Numeric:
         wl = self._validate(wl, unit)
@@ -394,6 +420,11 @@ class Conrady(Material):
                 f'B={self.b:.{precision}f}')
 
 
+_lib = {
+    'vacuum': Constant('vacuum', 1.),
+}
+
+
 def get(name: str, default_none: bool = False) -> Union[Material, None]:
     """
     Get material by name.
@@ -408,7 +439,7 @@ def get(name: str, default_none: bool = False) -> Union[Material, None]:
     if m is None:
         if default_none:
             return None
-        raise ValueError(f'Unknown material: {name}')
+        raise KeyError(f'Unknown material: {name}')
     return m
 
 
@@ -420,7 +451,7 @@ def register(name: str, material: Material):
     :param Material material: The material instance.
     """
     if name in _lib:
-        raise ValueError(f'Material {name} already exists.')
+        raise KeyError(f'Material {name} already exists.')
     _lib[name] = material
 
 
@@ -459,3 +490,10 @@ def list_all() -> list[str]:
     :rtype: list[str]
     """
     return list(_lib.keys())
+
+
+def remove(name: str, ignore_if_absent: bool = False):
+    if name in _lib:
+        del _lib[name]
+    elif not ignore_if_absent:
+        raise KeyError(f'Unknown material: {name}')

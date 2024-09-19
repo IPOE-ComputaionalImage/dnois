@@ -1,3 +1,4 @@
+# TODO: detection
 import abc
 import re
 import warnings
@@ -6,9 +7,9 @@ import torch
 from torch import nn
 
 from dnois import utils, fourier
-from dnois.utils.typing import (
-    Ts, Spacing, Param, Literal, Sequence, Size2d, Callable,
-    cast, is_scalar, scalar, param, size2d, pair,
+from dnois.base.typing import (
+    Ts, Spacing, Vector, Literal, Sequence, Size2d, Callable,
+    cast, is_scalar, scalar, vector, size2d, pair,
 )
 
 __all__ = [
@@ -24,7 +25,6 @@ __all__ = [
     'init_fresnel_ft',
 
     'AngularSpectrum',
-    'ASM',
     'DMode',
     'Fraunhofer',
     'FresnelConv',
@@ -65,12 +65,11 @@ def _determine_cache(callback: Callable, cache: _Cache, *args) -> _Cache:
 def _init_ft_common(
     far_field: bool,  # Fraunhofer if True, Fresnel otherwise
     grid_size: Size2d,
-    wl: Param,
-    distance: Param,
+    wl: Vector,
+    distance: Vector,
     dx: Spacing,  # Scalar or (...,N_d,N_wl)
     dy: Spacing = None,  # default to dx
     delta_mode: DMode = 'backward',
-    symmetric_even_grid: bool = False,
     pupil_exp_form: bool = True,
     post_phase_factor: bool = True,
     scale_factor: bool = True,
@@ -91,10 +90,10 @@ def _init_ft_common(
         raise ValueError(f'Unknown delta_mode: {delta_mode}')
     # shape of deltas at present: (,) or (...,N_d,N_wl)
     cache = {'du': du[..., None, None], 'dv': dv[..., None, None]}  # add two more dim for ft
-    v, u = utils.sym_grid(2, grid_size, (dv, du), symmetric_even_grid)
+    v, u = utils.sym_grid(2, grid_size, (dv, du))
 
-    wl = param(wl)
-    distance = param(distance)
+    wl = vector(wl)
+    distance = vector(distance)
     prod = wl * distance.unsqueeze(-1)  # N_d x N_wl
     phase_scale = torch.pi / prod  # k/(2d)
     quadratic_phase = phase_scale[..., None, None] * (u.square() + v.square())
@@ -105,7 +104,7 @@ def _init_ft_common(
             cache['quadratic_phase_factor'] = utils.expi(quadratic_phase)
 
     if post_phase_factor:
-        y, x = utils.sym_grid(2, grid_size, (dy, dx), symmetric_even_grid)
+        y, x = utils.sym_grid(2, grid_size, (dy, dx))
         _post_phase = phase_scale[..., None, None] * (x.square() + y.square())
         _post_phase += 2 * torch.pi * distance.unsqueeze(-4) / wl - torch.pi / 2
         cache['post_phase_factor'] = utils.expi(_post_phase)
@@ -116,15 +115,14 @@ def _init_ft_common(
     return cache
 
 
-def _init_conv_common(
+def _init_as_common(
     paraxial: bool,
     grid_size: Size2d,
-    wl: Param,
-    distance: Param,
+    wl: Vector,
+    distance: Vector,
     dx: Spacing,
     dy: Spacing = None,
     pad: Size2d = 0,
-    symmetric_even_grid: bool = False,
 ) -> _Cache:
     if dy is None:
         dy = dx
@@ -133,11 +131,11 @@ def _init_conv_common(
     grid_size = (grid_size[0] + 2 * pad[0], grid_size[1] + 2 * pad[1])
     dfy = 1 / (grid_size[0] * dy)
     dfx = 1 / (grid_size[1] * dx)
-    fy, fx = utils.sym_grid(2, grid_size, (dfy, dfx), symmetric_even_grid)
+    fy, fx = utils.sym_grid(2, grid_size, (dfy, dfx))
     rou2 = fx.square() + fy.square()
 
-    wl = param(wl)
-    distance = param(distance)
+    wl = vector(wl)
+    distance = vector(distance)
     kd = 2 * torch.pi / wl * distance.unsqueeze(-1)
     if paraxial:
         phase_scale = - torch.pi * wl * distance.unsqueeze(-1)  # -pi lambda d
@@ -166,23 +164,22 @@ def _init_conv_common(
 def _ft_common(
     far_field: bool,  # Fraunhofer if True, Fresnel otherwise
     pupil: Ts | tuple[Ts, Ts],
-    wl: Param = None,
-    distance: Param = None,
+    wl: Vector = None,
+    distance: Vector = None,
     dx: Spacing = None,
     dy: Spacing = None,
     delta_mode: DMode = 'backward',
     post_phase_factor: bool = False,
     scale_factor: bool = True,
-    symmetric_even_grid: bool = False,
     dft_scale: bool = True,
     intermediate: _Cache = None,
-) -> Ts:  # TODO: aliasing detection
+) -> Ts:
     argument_available = isinstance(pupil, tuple)
     grid_size = pupil[0].shape[-2:] if argument_available else pupil.shape[-2:]
     intermediate = _determine_cache(lambda: _init_ft_common(
         far_field,
         grid_size, wl, distance, dx, dy, delta_mode,
-        symmetric_even_grid, argument_available, post_phase_factor, scale_factor
+        argument_available, post_phase_factor, scale_factor
     ), intermediate, wl, distance, dx)
 
     if far_field:
@@ -210,20 +207,19 @@ def _ft_common(
     return field
 
 
-def _conv_common(
+def _as_common(
     paraxial: bool,
     pupil: Ts,
-    wl: Param = None,
-    distance: Param = None,
+    wl: Vector = None,
+    distance: Vector = None,
     dx: Spacing = None,
     dy: Spacing = None,
     pad: Size2d = 0,
-    symmetric_even_grid: bool = False,
     intermediate: _Cache = None,
-) -> Ts:  # TODO: aliasing detection
+) -> Ts:
     grid_size = (pupil.size(-2), pupil.size(-1))
     intermediate = _determine_cache(
-        lambda: _init_conv_common(paraxial, grid_size, wl, distance, dx, dy, pad, symmetric_even_grid),
+        lambda: _init_as_common(paraxial, grid_size, wl, distance, dx, dy, pad),
         intermediate,
         wl, distance, dx
     )
@@ -239,8 +235,8 @@ def _conv_common(
 def delta_convert(
     delta: Spacing | Sequence[Spacing],
     n: int | Sequence[int],
-    wl: Param,
-    distance: Param,
+    wl: Vector,
+    distance: Vector,
 ) -> Spacing | list[Spacing]:
     r"""
     Convert grid spacing between source plane (:math:`\delta_\text{s}`) and
@@ -271,7 +267,7 @@ def delta_convert(
     if is_scalar(wl) and is_scalar(distance):
         prod = scalar(wl) * scalar(distance)  # 0d tensor
     else:
-        prod = param(wl) * param(distance).unsqueeze(-1)  # N_d x N_wl
+        prod = vector(wl) * vector(distance).unsqueeze(-1)  # N_d x N_wl
 
     if is_seq:
         delta: Sequence[Spacing]
@@ -283,12 +279,11 @@ def delta_convert(
 
 def init_fresnel_ft(
     grid_size: Size2d,
-    wl: Param,
-    distance: Param,
+    wl: Vector,
+    distance: Vector,
     dx: Spacing,
     dy: Spacing = None,
     delta_mode: DMode = 'backward',
-    symmetric_even_grid: bool = False,
     pupil_exp_form: bool = True,
     post_phase_factor: bool = True,
     scale_factor: bool = True,
@@ -303,7 +298,6 @@ def init_fresnel_ft(
     :param dx: See :py:func:`fresnel_ft`.
     :param dy: See :py:func:`fresnel_ft`.
     :param delta_mode: See :py:func:`fresnel_ft`.
-    :param symmetric_even_grid: See :py:func:`fresnel_ft`.
     :param pupil_exp_form: Whether the pupil function passed to :py:func:`fresnel_ft` is a
         a pair of tensors representing its amplitude and phase, or a single complex tensor
         if ``False``. See :py:func:`fresnel_ft`.
@@ -315,18 +309,17 @@ def init_fresnel_ft(
     return _init_ft_common(
         False,
         grid_size, wl, distance, dx, dy,
-        delta_mode, symmetric_even_grid, pupil_exp_form, post_phase_factor, scale_factor
+        delta_mode, pupil_exp_form, post_phase_factor, scale_factor
     )
 
 
 def init_fresnel_conv(
     grid_size: Size2d,
-    wl: Param,
-    distance: Param,
+    wl: Vector,
+    distance: Vector,
     dx: Spacing,
     dy: Spacing = None,
     pad: Size2d = 0,
-    symmetric_even_grid: bool = False,
 ) -> _Cache:
     """
     Pre-compute the intermediate results in Fresnel diffraction integral and return them
@@ -339,21 +332,19 @@ def init_fresnel_conv(
     :param dx: See :py:func:`fresnel_conv`.
     :param dy: See :py:func:`fresnel_conv`.
     :param pad: See :py:func:`fresnel_conv`.
-    :param symmetric_even_grid: See :py:func:`fresnel_conv`.
     :return: Intermediate results that can be passed to :py:func:`fresnel_conv` as
         ``intermediate`` argument.
     """
-    return _init_conv_common(True, grid_size, wl, distance, dx, dy, pad, symmetric_even_grid)
+    return _init_as_common(True, grid_size, wl, distance, dx, dy, pad)
 
 
 def init_fraunhofer(
     grid_size: Size2d,
-    wl: Param,
-    distance: Param,
+    wl: Vector,
+    distance: Vector,
     dx: Spacing,
     dy: Spacing = None,
     delta_mode: DMode = 'backward',
-    symmetric_even_grid: bool = False,
     post_phase_factor: bool = True,
     scale_factor: bool = True,
 ) -> _Cache:
@@ -367,7 +358,6 @@ def init_fraunhofer(
     :param dx: See :py:func:`fraunhofer`.
     :param dy: See :py:func:`fraunhofer`.
     :param delta_mode: See :py:func:`fraunhofer`.
-    :param symmetric_even_grid: See :py:func:`fraunhofer`.
     :param post_phase_factor: See :py:func:`fraunhofer`.
     :param scale_factor: See :py:func:`fraunhofer`.
     :return: Intermediate results that can be passed to :py:func:`fraunhofer` as
@@ -376,18 +366,17 @@ def init_fraunhofer(
     return _init_ft_common(
         False,
         grid_size, wl, distance, dx, dy,
-        delta_mode, symmetric_even_grid, False, post_phase_factor, scale_factor
+        delta_mode, False, post_phase_factor, scale_factor
     )
 
 
 def init_angular_spectrum(
     grid_size: Size2d,
-    wl: Param,
-    distance: Param,
+    wl: Vector,
+    distance: Vector,
     dx: Spacing,
     dy: Spacing = None,
     pad: Size2d = 0,
-    symmetric_even_grid: bool = False,
 ) -> _Cache:
     """
     Pre-compute the intermediate results in Fresnel diffraction integral and return them
@@ -400,23 +389,21 @@ def init_angular_spectrum(
     :param dx: See :py:func:`angular_spectrum`.
     :param dy: See :py:func:`angular_spectrum`.
     :param pad: See :py:func:`angular_spectrum`.
-    :param symmetric_even_grid: See :py:func:`angular_spectrum`.
     :return: Intermediate results that can be passed to :py:func:`angular_spectrum` as
         ``intermediate`` argument.
     """
-    return _init_conv_common(False, grid_size, wl, distance, dx, dy, pad, symmetric_even_grid)
+    return _init_as_common(False, grid_size, wl, distance, dx, dy, pad)
 
 
 def fresnel_ft(
     pupil: Ts | tuple[Ts, Ts],
-    wl: Param = None,
-    distance: Param = None,
+    wl: Vector = None,
+    distance: Vector = None,
     dx: Spacing = None,
     dy: Spacing = None,
     delta_mode: DMode = 'backward',
     post_phase_factor: bool = False,
     scale_factor: bool = True,
-    symmetric_even_grid: bool = False,
     dft_scale: bool = True,
     intermediate: _Cache = None,
 ) -> Ts:
@@ -463,10 +450,6 @@ def fresnel_ft(
     :param scale_factor: Whether to multiply the factor :math:`1/(\lambda d)`.
         It can be omitted to reduce computation if relative scales between results across
         different :math:`d` and :math:`\lambda` do not matter.
-    :param symmetric_even_grid: Whether the spatial grid is symmetric w.r.t. the origin
-        if its size is even. For example, if grid size is 4, the grid points
-        may be ``[-2, -1, 0, 1]`` if False or ``[-1.5, -0.5, 0.5, 1.5]`` if True.
-        Default: ``False``.
     :param dft_scale: Whether to apply scale correction for DFT. Default: ``True``.
     :param intermediate: Cached intermediate results returned by :py:func:`init_fresnel_ft`.
         This can be used to speed up computation.
@@ -476,8 +459,7 @@ def fresnel_ft(
     return _ft_common(
         False,
         pupil, wl, distance, dx, dy,
-        delta_mode, post_phase_factor, scale_factor, symmetric_even_grid, dft_scale,
-        intermediate,
+        delta_mode, post_phase_factor, scale_factor, dft_scale, intermediate,
     )
 
 
@@ -489,12 +471,11 @@ def fresnel_2ft(
 
 def fresnel_conv(
     pupil: Ts,
-    wl: Param = None,
-    distance: Param = None,
+    wl: Vector = None,
+    distance: Vector = None,
     dx: Spacing = None,
     dy: Spacing = None,
     pad: Size2d = 0,
-    symmetric_even_grid: bool = False,
     intermediate: _Cache = None,
 ) -> Ts:
     r"""
@@ -534,28 +515,23 @@ def fresnel_conv(
     :param pad: Padding width used for DFT. A 2-tuple of integers representing paddings
         for vertical and horizontal directions, or a single integer if they are equal.
         Default: no padding.
-    :param symmetric_even_grid: Whether the spatial grid is symmetric w.r.t. the origin
-        if its size is even. For example, if grid size is 4, the grid points
-        may be ``[-2, -1, 0, 1]`` if False or ``[-1.5, -0.5, 0.5, 1.5]`` if True.
-        Default: ``False``.
     :param intermediate: Cached intermediate results returned by :py:func:`init_fresnel_conv`.
         This can be used to speed up computation.
     :return: Diffracted complex amplitude :math:`U'`.
         A tensor of shape :math:`(\cdots,N_d,N_\lambda,H,W)`.
     """
-    return _conv_common(True, pupil, wl, distance, dx, dy, pad, symmetric_even_grid, intermediate)
+    return _as_common(True, pupil, wl, distance, dx, dy, pad, intermediate)
 
 
 def fraunhofer(
     pupil: Ts,
-    wl: Param = None,
-    distance: Param = None,
+    wl: Vector = None,
+    distance: Vector = None,
     dx: Spacing = None,
     dy: Spacing = None,
     delta_mode: DMode = 'backward',
     post_phase_factor: bool = False,
     scale_factor: bool = True,
-    symmetric_even_grid: bool = False,
     dft_scale: bool = True,
     intermediate: _Cache = None,
 ) -> Ts:
@@ -595,10 +571,6 @@ def fraunhofer(
     :param scale_factor: Whether to multiply the factor :math:`1/(\lambda d)`.
         It can be omitted to reduce computation if relative scales between results across
         different :math:`d` and :math:`\lambda` do not matter.
-    :param symmetric_even_grid: Whether the spatial grid is symmetric w.r.t. the origin
-        if its size is even. For example, if grid size is 4, the grid points
-        may be ``[-2, -1, 0, 1]`` if False or ``[-1.5, -0.5, 0.5, 1.5]`` if True.
-        Default: ``False``.
     :param dft_scale: Whether to apply scale correction for DFT. Default: ``True``.
     :param intermediate: Cached intermediate results returned by :py:func:`init_fraunhofer`.
         This can be used to speed up computation.
@@ -608,19 +580,17 @@ def fraunhofer(
     return _ft_common(
         True,
         pupil, wl, distance, dx, dy, delta_mode,
-        post_phase_factor, scale_factor, symmetric_even_grid, dft_scale,
-        intermediate
+        post_phase_factor, scale_factor, dft_scale, intermediate
     )
 
 
 def angular_spectrum(
     pupil: Ts,
-    wl: Param = None,
-    distance: Param = None,
+    wl: Vector = None,
+    distance: Vector = None,
     dx: Spacing = None,
     dy: Spacing = None,
     pad: Size2d = 0,
-    symmetric_even_grid: bool = False,
     intermediate: _Cache = None,
 ) -> Ts:
     r"""
@@ -659,16 +629,12 @@ def angular_spectrum(
     :param pad: Padding width used for DFT. A 2-tuple of integers representing paddings
         for vertical and horizontal directions, or a single integer if they are equal.
         Default: no padding.
-    :param symmetric_even_grid: Whether the spatial grid is symmetric w.r.t. the origin
-        if its size is even. For example, if grid size is 4, the grid points
-        may be ``[-2, -1, 0, 1]`` if False or ``[-1.5, -0.5, 0.5, 1.5]`` if True.
-        Default: ``False``.
     :param intermediate: Cached intermediate results returned by :py:func:`init_angular_spectrum`.
         This can be used to speed up computation.
     :return: Diffracted complex amplitude :math:`U'`.
         A tensor of shape :math:`(\cdots,N_d,N_\lambda,H,W)`.
     """
-    return _conv_common(False, pupil, wl, distance, dx, dy, pad, symmetric_even_grid, intermediate)
+    return _as_common(False, pupil, wl, distance, dx, dy, pad, intermediate)
 
 
 class Diffraction(nn.Module, metaclass=abc.ABCMeta):
@@ -693,13 +659,11 @@ class Diffraction(nn.Module, metaclass=abc.ABCMeta):
     def __init__(
         self,
         grid_size: Size2d,
-        wl: Param = None,
-        d: Param = None,
-        symmetric_even_grid: bool = False,
+        wl: Vector = None,
+        d: Vector = None,
     ):
         super().__init__()
         self._grid_size = size2d(grid_size)
-        self._seg = symmetric_even_grid
 
         self._ptn = re.compile('^[uvxy]((_range)|(_size))?$')
         self._ready = False  # diffraction and grid
@@ -714,14 +678,10 @@ class Diffraction(nn.Module, metaclass=abc.ABCMeta):
             dim = 0 if item[0] == 'v' or item[0] == 'y' else 1
             size = self._grid_size[dim]
             if len(item) == 1:  # u/v/x/y
-                axis = utils.sym_interval(size, spacing.unsqueeze(-1), self._seg)
+                axis = utils.sym_interval(size, spacing.unsqueeze(-1))
                 return axis.unsqueeze(-1 - dim)  # 1 x W for u/x or H x 1 for v/y
             elif item[2] == 'r':  # range
-                if self._seg:
-                    r = spacing * (size - 1) / 2
-                    return -r, r
-                else:
-                    return -spacing * (size // 2), spacing * ((size - 1) // 2)
+                return -spacing * (size // 2), spacing * ((size - 1) // 2)
             else:  # size
                 return spacing * size
         else:
@@ -736,8 +696,8 @@ class Diffraction(nn.Module, metaclass=abc.ABCMeta):
         return self.__dict__['_buffers']['_wl']
 
     @wl.setter
-    def wl(self, value: Param):
-        value = scalar(value) if is_scalar(value) else param(value)
+    def wl(self, value: Vector):
+        value = scalar(value) if is_scalar(value) else vector(value)
         self.register_buffer('_wl', value, False)
         self._ready = False
 
@@ -746,8 +706,8 @@ class Diffraction(nn.Module, metaclass=abc.ABCMeta):
         return self.__dict__['_buffers']['_d']
 
     @d.setter
-    def d(self, value: Param):
-        value = scalar(value) if is_scalar(value) else param(value)
+    def d(self, value: Vector):
+        value = scalar(value) if is_scalar(value) else vector(value)
         self.register_buffer('_d', value, False)
         self._ready = False
 
@@ -814,16 +774,15 @@ class FourierTransformBased(Diffraction):
         self,
         grid_size: Size2d,
         spacing: Spacing | tuple[Spacing, Spacing] = None,
-        wl: Param = None,
-        d: Param = None,
+        wl: Vector = None,
+        d: Vector = None,
         ampl_phase_form: bool = True,
         delta_mode: DMode = 'backward',
         post_phase_factor: bool = False,
         scale_factor: bool = True,
         dft_scale: bool = True,
-        symmetric_even_grid: bool = False,
     ):
-        super().__init__(grid_size, wl, d, symmetric_even_grid)
+        super().__init__(grid_size, wl, d)
         self._apf = ampl_phase_form
         self._delta_mode = delta_mode
         self._ppf = post_phase_factor
@@ -843,7 +802,7 @@ class FourierTransformBased(Diffraction):
             self._far_field,  # Fresnel or Fraunhofer
             self._grid_size,
             self.wl, self.d, d1, d2, self._delta_mode,  # required parameters
-            self._seg, self._apf, self._ppf, self._sf,  # options
+            self._apf, self._ppf, self._sf,  # options
         )
 
     @property
@@ -901,34 +860,33 @@ class FourierTransformBased(Diffraction):
         )
 
 
-class ConvolutionBased(Diffraction):
+class AngularSpectrumBased(Diffraction):
     _paraxial: bool
 
     def __init__(
         self,
         grid_size: Size2d,
         spacing: Spacing | tuple[Spacing, Spacing] = None,
-        wl: Param = None,
-        d: Param = None,
+        wl: Vector = None,
+        d: Vector = None,
         pad: Size2d = 0,
-        symmetric_even_grid: bool = False,
     ):
-        super().__init__(grid_size, wl, d, symmetric_even_grid)
+        super().__init__(grid_size, wl, d)
         self._pad = size2d(pad)
 
         self.dv, self.du = pair(spacing)
 
     def _init_cache(self):
-        return _init_conv_common(
+        return _init_as_common(
             self._paraxial,
             self._grid_size,
             self.wl, self.d, self.du, self.dv,
-            self._pad, self._seg
+            self._pad
         )
 
     def forward(self, pupil: Ts) -> Ts:
         self._build()
-        return _conv_common(self._paraxial, pupil, pad=self._pad, intermediate=self._cache)
+        return _as_common(self._paraxial, pupil, pad=self._pad, intermediate=self._cache)
 
 
 class FresnelFT(FourierTransformBased):
@@ -939,12 +897,9 @@ class Fraunhofer(FourierTransformBased):
     _far_field: bool = True
 
 
-class FresnelConv(ConvolutionBased):
+class FresnelConv(AngularSpectrumBased):
     _paraxial: bool = True
 
 
-class AngularSpectrum(ConvolutionBased):
+class AngularSpectrum(AngularSpectrumBased):
     _paraxial: bool = False
-
-
-ASM = AngularSpectrum

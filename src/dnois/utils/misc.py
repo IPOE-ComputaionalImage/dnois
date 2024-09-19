@@ -3,7 +3,7 @@ from functools import partial
 import torch
 from torch import nn
 
-from .typing import Ts, Callable
+from dnois.base.typing import Ts, Callable
 
 __all__ = [
     'abs2',

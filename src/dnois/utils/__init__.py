@@ -8,4 +8,4 @@ from .grid import *
 from .image import *
 from .misc import *
 
-from . import grid, image, misc, typing
+from . import grid, image, misc
