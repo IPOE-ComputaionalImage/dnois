@@ -17,6 +17,8 @@ import torch
 from dnois.base.typing import Numeric, Union, cast
 
 __all__ = [
+    'vacuum',
+
     'get',
     'is_available',
     'list_all',
@@ -420,8 +422,9 @@ class Conrady(Material):
                 f'B={self.b:.{precision}f}')
 
 
+vacuum = Constant('vacuum', 1.)
 _lib = {
-    'vacuum': Constant('vacuum', 1.),
+    'vacuum': vacuum,
 }
 
 

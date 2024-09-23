@@ -5,9 +5,9 @@ import torch
 from torch import nn
 
 from dnois import mt
-from dnois.base.typing import Sequence, Ts, Any
+from dnois.base.typing import Sequence, Ts, Any, Callable, Literal, Scalar, scalar
 
-from .ray import BatchedRay
+from .ray import BatchedRay, NoValidRayError
 
 __all__ = [
     'NT_EPSILON',
@@ -17,15 +17,17 @@ __all__ = [
     'NT_UPDATE_BOUND',
 
     'Context',
-    'LensGroup',
+    'SurfaceList',
     'Surface',
 ]
 
 NT_MAX_ITERATION: int = 10
-NT_THRESHOLD: float = 50e-9
-NT_THRESHOLD_STRICT: float = 1e-9
+NT_THRESHOLD: float = 20e-9
+NT_THRESHOLD_STRICT: float = 20e-9
 NT_UPDATE_BOUND: float = 5.
 NT_EPSILON: float = 1e-9
+
+SAMPLE_LIMIT: float = 0.98
 
 
 class Context:
@@ -37,12 +39,12 @@ class Context:
     If it is not contained in any group, its context attribute is ``None``.
 
     :param Surface surface: The host surface that this context belongs to.
-    :param LensGroup lens_group: The lens group containing the surface.
+    :param SurfaceList lens_group: The lens group containing the surface.
     """
 
-    def __init__(self, surface: 'Surface', lens_group: 'LensGroup'):
+    def __init__(self, surface: 'Surface', lens_group: 'SurfaceList'):
         self.surface: 'Surface' = surface  #: The host surface that this context belongs to.
-        self.lens_group: 'LensGroup' = lens_group  #: The lens group containing the surface.
+        self.lens_group: 'SurfaceList' = lens_group  #: The lens group containing the surface.
 
     @property
     def index(self) -> int:
@@ -117,15 +119,12 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         self,
         radius: float,
         material: mt.Material | str,
-        distance: float | Ts,
+        distance: Scalar,
         newton_config: dict[str, Any] = None
     ):
         super().__init__()
-        if not torch.is_tensor(distance):
-            distance = torch.tensor(distance)
-        if distance.ndim != 0:
-            raise ValueError('distance must be a float or a 0D tensor')
-        if distance < 0:
+        distance = scalar(distance)
+        if distance.item() < 0:
             raise ValueError('distance must not be negative')
         if newton_config is None:
             newton_config = {}
@@ -146,7 +145,7 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         self._nt_epsilon = newton_config.get('epsilon', NT_EPSILON)
 
     @abc.abstractmethod
-    def h(self, x: Ts, y: Ts) -> Ts:
+    def h(self, x: Ts, y: Ts = None) -> Ts:  # TODO: use typing.overload
         r"""
         Compute surface function :math:`h(x,y;\mathbf{\theta})`.
 
@@ -157,106 +156,171 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def h_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+    def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
         r"""
         Compute the partial derivatives of surface function
         :math:`\pfrac{h(x,y;\mathbf{\theta})}{x}` and :math:`\pfrac{h(x,y;\mathbf{\theta})}{y}`.
 
         :param x:
         :param y:
+        :param r2:
         :return:
         """
         pass
 
-    def normal(self, x: Ts, y: Ts) -> Ts:
-        """
-        Point to positive z. unit vector. TODO
+    @property
+    @abc.abstractmethod
+    def geo_radius(self) -> Ts:
+        pass
 
-        :param x:
-        :param y:
-        :return:
-        """
-        phpx, phpy = self.h_grad(x, y)
-        f_grad = torch.cat((-phpx, -phpy, -torch.ones_like(phpx)), dim=-1)
-        return f_grad / f_grad.norm(2, -1, True)
+    def h_extended(self, x: Ts, y: Ts = None) -> Ts:
+        r2 = x if y is None else x.square() + y.square()
+        lim2 = self.geo_radius.square()
+        return torch.where(r2 <= lim2, self.h(r2), self.h(lim2))
+
+    def h_grad_extended(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
+        if r2 is None:
+            r2 = x.square() + y.square()
+        lim2 = self.geo_radius.square()
+        phpx, phpy = self.h_grad(x, y, r2)
+        mask = r2 <= lim2
+        return torch.where(mask, phpx, 0), torch.where(mask, phpy, r2)
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        magnitude = self._nt_threshold_strict / torch.finfo(ray.o.dtype).eps
+        if torch.abs(ray.z - self.context.z).gt(magnitude).any():
+            new_z = self.context.z - magnitude if forward else self.context.z + magnitude
+            ray.march_to_(new_z, self.context.material_before.n(ray.wl, 'm'))
+
         if forward:
-            valid = torch.logical_and(self._eval_f(ray) > 0, ray.d_z > 0)
+            valid = torch.logical_and(self._eval_f(ray) >= 0, ray.d_z > 0)
         else:
-            valid = torch.logical_and(self._eval_f(ray) < 0, ray.d_z < 0)
+            valid = torch.logical_and(self._eval_f(ray) <= 0, ray.d_z < 0)
         ray.update_valid_(valid, 'copy')
+
         return self.refract(self.intersect(ray), forward)
 
     def intersect(self, ray: BatchedRay) -> BatchedRay:
         t = (self.context.z - ray.z) / ray.d_z
         cnt = 0  # equal to numbers of derivative computation
+        new_ray = ray.clone(False)
+        new_ray.norm_d_()
         with torch.no_grad():
             while True:
-                o = ray.o + ray.d * t.unsqueeze(-1)
-                new_ray = BatchedRay(o, ray.d, ray.wl, False)  # do not compute opl for temporary ray
-                # TODO: more appropriate way to handle the rays marked as 'invalid' by this filtering
-                # because a ray is invalid at a specific iteration does not mean these is no
-                # solution for the ray finally
-                new_ray.update_valid_(self._valid(new_ray.x, new_ray.y), 'copy')
-                f_value = self._eval_f(new_ray)
+                new_ray.o = ray.o + new_ray.d_norm * t.unsqueeze(-1)  # do not compute opl for root finder
+                r2 = new_ray.x.square() + new_ray.y.square()
+                f_value = self._eval_f(new_ray, r2)
                 if torch.all(f_value.abs() < self._nt_threshold) or cnt >= self._nt_max_iteration:
                     break
 
-                t = t - self._newton_descent(new_ray, f_value)
+                t = t - self._newton_descent(new_ray, f_value, r2)
                 cnt += 1
 
-        t = t - self._newton_descent(new_ray, self._eval_f(new_ray))
-        ray.march_(t, self.context.material_before.n(ray.wl))
+        # the second argument cannot be replaced by f_value because of computational graph
+        r2 = new_ray.x.square() + new_ray.y.square()
+        t = t - self._newton_descent(new_ray, self._eval_f(new_ray, r2), r2)
+        ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
         ray.update_valid_(
-            self._valid(ray.x, ray.y) and
-            self._eval_f(ray).abs() < self._nt_threshold and
-            t > 0, 'copy'
+            self._valid(ray.x, ray.y) &
+            (self._eval_f(ray).abs() < self._nt_threshold_strict) &
+            (t > 0), 'copy'
         )
         return ray
 
+    def normal(self, x: Ts, y: Ts, r2: Ts = None) -> Ts:
+        """
+        Point to positive z. unit vector. TODO
+
+        :param x:
+        :param y:
+        :param r2:
+        :return:
+        """
+        phpx, phpy = self.h_grad(x, y, r2)
+        f_grad = torch.stack((-phpx, -phpy, torch.ones_like(phpx)), dim=-1)
+        return f_grad / f_grad.norm(2, -1, True)
+
     def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        ray = ray.clone(False)
         n = self.normal(ray.x, ray.y)
         if not forward:
             n = -n
         i = ray.d_norm
         if forward:
-            miu = self.context.material_before.n(ray.wl) / self.material.n(ray.wl)
+            miu = self.context.material_before.n(ray.wl, 'm') / self.material.n(ray.wl, 'm')
         else:
-            miu = self.material.n(ray.wl) / self.context.material_before.n(ray.wl)
+            miu = self.material.n(ray.wl, 'm') / self.context.material_before.n(ray.wl, 'm')
         miu = miu.unsqueeze(-1)
         ni = torch.sum(n * i, dim=-1).unsqueeze(-1)
         nt2 = 1 - miu.square() * (1 - ni.square())
-        t = torch.sqrt(nt2.relu()) * n + miu * (i - ni * n)
+        t = torch.sqrt(nt2.relu_()) * n + miu * (i - ni * n)
         ray.d = t
-        ray.update_valid_(nt2 > 0, 'copy')
+        ray.update_valid_(nt2.squeeze(-1) > 0, 'copy').norm_d_()
         return ray
 
-    def _eval_f(self, ray: BatchedRay) -> Ts:
-        return self.h(ray.x, ray.y) + self.context.z - ray.z
+    def sample(
+        self, n: tuple[int, int],
+        mode: Literal['rectangular', 'circular'],
+        sampling_curve: Callable[[Ts], Ts] = None,
+        **kwargs
+    ) -> tuple[Ts, Ts]:
+        if mode == 'circular':
+            t = torch.arange(n[0], **kwargs).unsqueeze(0) / n[0] * (2 * torch.pi)
+            r = torch.linspace(1 / n[1], SAMPLE_LIMIT, n[1], **kwargs).unsqueeze(1)
+            if sampling_curve is not None:
+                r = sampling_curve(r)
+            r = r * self.radius
+            return torch.flatten(r * t.cos()), torch.flatten(r * t.sin())
+        elif mode == 'rectangular':  # TODO: this seems meaningless
+            xy = [torch.linspace(-SAMPLE_LIMIT, SAMPLE_LIMIT, _n, **kwargs) for _n in n]
+            if sampling_curve is not None:
+                xy = [sampling_curve(x_or_y[_n // 2:]) for x_or_y, _n in zip(xy, n)]
+                xy = [torch.cat((-x_or_y.flip([0])[:_n // 2], x_or_y)) for x_or_y, _n in zip(xy, n)]
+            x, y = torch.meshgrid(*xy, indexing='xy')
+            return x.flatten() * self.radius, y.flatten() * self.radius
+        else:
+            raise ValueError(f'Unknown mode: {mode}')
 
-    def _eval_f_grad(self, ray: BatchedRay) -> Ts:
-        phpx, phpy = self.h_grad(ray.x, ray.y)
-        return torch.cat((phpx, phpy, -torch.ones_like(phpx)), dim=-1)
+    def sample_random(self, n: int, sampling_curve: Callable[[Ts], Ts] = None, **kwargs) -> tuple[Ts, Ts]:
+        t = torch.rand(n, **kwargs) * (2 * torch.pi)
+        r = torch.rand(n, **kwargs)
+        if sampling_curve is not None:
+            r = sampling_curve(r)
+        r = r * self.radius
+        return r * t.cos(), r * t.sin()
+
+    @property
+    def device(self) -> torch.device:
+        return self.distance.device
+
+    def _eval_f(self, ray: BatchedRay, r2: Ts = None) -> Ts:
+        if r2 is None:
+            r2 = ray.x.square() + ray.y.square()
+        return self.h_extended(r2) + self.context.z - ray.z
+
+    def _eval_f_grad(self, ray: BatchedRay, r2: Ts = None) -> Ts:
+        if r2 is None:
+            r2 = ray.x.square() + ray.y.square()
+        phpx, phpy = self.h_grad_extended(ray.x, ray.y, r2)
+        return torch.stack((phpx, phpy, -torch.ones_like(phpx)), dim=-1)
 
     def _valid(self, x: Ts, y: Ts) -> Ts:
         return x.square() + y.square() < self.radius ** 2
 
-    def _newton_descent(self, ray: BatchedRay, f_value: Ts) -> Ts:
-        derivative_value = torch.sum(ray.d * self._eval_f_grad(ray), dim=-1)
+    def _newton_descent(self, ray: BatchedRay, f_value: Ts, r2: Ts = None) -> Ts:
+        derivative_value = torch.sum(ray.d_norm * self._eval_f_grad(ray, r2), dim=-1)
         descent = f_value / (derivative_value + self._nt_epsilon)
         descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
         return descent
 
 
-class LensGroup(nn.Module, collections.abc.MutableSequence):
+class SurfaceList(nn.Module, collections.abc.MutableSequence):
     _force_surface: bool = True
 
     def __init__(
         self,
         surfaces: Sequence[Surface] = None,
         env_material: mt.Material | str = 'vacuum',
-        fix_first: bool = True,
     ):
         super().__init__()
         if surfaces is None:
@@ -320,7 +384,10 @@ class LensGroup(nn.Module, collections.abc.MutableSequence):
         self._surfaces.extend(surfaces)
 
     def index(self, value, start: int = 0, stop: int = ...) -> int:
-        return self._slist.index(value, start, stop)
+        if stop is ...:
+            return self._slist.index(value, start)
+        else:
+            return self._slist.index(value, start, stop)
 
     def insert(self, index: int, surface: Surface):
         self._welcome(surface)
@@ -343,12 +410,29 @@ class LensGroup(nn.Module, collections.abc.MutableSequence):
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
         for s in (self._slist if forward else reversed(self._slist)):
-            ray = s(ray)
+            try:
+                ray = s(ray, forward)
+            except NoValidRayError as e:
+                idx = self.index(s)
+                e.add_note(f'Valid rays vanish during the forward pass of surface {idx}')
+                raise e
         return ray
 
     @property
-    def surfaces(self):
+    def surfaces(self) -> list[Surface]:
         return [s for s in self._slist]
+
+    @property
+    def length(self) -> Ts | None:
+        if len(self._slist) < 2:
+            return None
+        return sum(s.distance for s in self._slist[:-1])
+
+    @property
+    def total_length(self) -> Ts | None:
+        if len(self._slist) == 0:
+            return None
+        return sum(s.distance for s in self._slist)
 
     def _welcome(self, *new: Surface):
         for surface in new:

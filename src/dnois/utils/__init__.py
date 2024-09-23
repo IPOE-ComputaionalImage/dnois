@@ -7,5 +7,6 @@ type hint, image manipulation and computation, etc.
 from .grid import *
 from .image import *
 from .misc import *
+from .vis import *
 
-from . import grid, image, misc
+from . import grid, image, misc, vis

@@ -1,5 +1,7 @@
 furo
+lightning
 matplotlib
 notebook
 sphinx
+tensorboard
 torch

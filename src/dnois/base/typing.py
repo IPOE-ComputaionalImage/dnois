@@ -27,10 +27,12 @@ __all__ = [
     'ConvOut',
     'FovSeg',
     'Numeric',
+    'RGBFormat',
     'Scalar',
     'SclOrVec',
     'Size2d',
     'Spacing',
+    'SurfSample',
     'Tensor',
     'Ts',
     'Vector',
@@ -52,8 +54,12 @@ Vector = Union[float, Sequence[float], Ts]  # can be converted to 1d tensor
 SclOrVec = Union[float, Sequence[float], Ts]  # Scalar or Vector
 
 Size2d = Union[int, tuple[int, int]]
+
+# options
 FovSeg = Literal['paraxial', 'pointwise']
 ConvOut = Literal['full', 'same', 'valid']
+SurfSample = Literal['circular', 'rectangular', 'random']
+RGBFormat = Literal['floats', 'ints', 'hex']
 
 
 def size2d(size: Size2d) -> tuple[int, int]:
@@ -69,27 +75,37 @@ def size2d(size: Size2d) -> tuple[int, int]:
 
 
 def vector(arg: Vector, dtype: _dty = None, device: Device = None, **kwargs) -> Ts:
+    cfg = {}
+    if dtype is not None:
+        cfg['dtype'] = dtype
+    if device is not None:
+        cfg['device'] = device
     if isinstance(arg, float):
-        return torch.tensor([arg], dtype, device)
+        return torch.tensor([arg], **cfg)
     elif isinstance(arg, Sequence) and all(isinstance(item, float) for item in arg):
-        return torch.tensor(arg, dtype, device)
+        return torch.tensor(arg, **cfg)
     elif is_tensor(arg):
         if arg.ndim == 0:
             arg = arg.unsqueeze(0)
         if arg.ndim != 1:
             raise ShapeError(f'Trying to convert a tensor with shape {arg.shape} to a vector')
-        return arg.to(device, dtype, **kwargs)
+        return arg.to(**cfg, **kwargs)
     else:
         raise TypeError(f'A float, a sequence of float or a 1d tensor expected, got {type(arg)}')
 
 
 def scalar(arg: Scalar, dtype: _dty = None, device: Device = None, **kwargs) -> Ts:
+    cfg = {}
+    if dtype is not None:
+        cfg['dtype'] = dtype
+    if device is not None:
+        cfg['device'] = device
     if isinstance(arg, float):
-        return torch.tensor(arg, dtype, device)
+        return torch.tensor(arg, **cfg)
     elif is_tensor(arg):
         if arg.ndim != 0:
             raise ShapeError(f'Trying to convert a tensor with shape {arg.shape} to a scalar')
-        return arg.to(device, dtype, **kwargs)
+        return arg.to(**cfg, **kwargs)
     else:
         raise TypeError(f'A float or a 0d tensor is expected, got {type(arg)}')
 
@@ -99,17 +115,22 @@ def is_scalar(arg: Any) -> bool:
 
 
 def scl_or_vec(arg: SclOrVec, dtype: _dty = None, device: Device = None, **kwargs) -> Ts:
+    cfg = {}
+    if dtype is not None:
+        cfg['dtype'] = dtype
+    if device is not None:
+        cfg['device'] = device
     if isinstance(arg, float):
-        return torch.tensor(arg, dtype, device)
+        return torch.tensor(arg, **cfg)
     elif isinstance(arg, Sequence) and all(isinstance(item, float) for item in arg):
-        return torch.tensor(arg, dtype, device)
+        return torch.tensor(arg, **cfg)
     elif is_tensor(arg):
         if arg.ndim > 1:
             raise ShapeError(f'Trying to convert a tensor with shape {arg.shape} to a scalar or vector')
-        return arg.to(device, dtype, **kwargs)
+        return arg.to(**cfg, **kwargs)
     else:
         raise TypeError(f'A float, a sequence of float or a 0d or 1d tensor expected, got {type(arg)}')
 
 
-def pair[_T](arg: Union[_T, tuple[_T, _T]]) -> tuple[_T, _T]:
+def pair(arg: Union[_T, tuple[_T, _T]]) -> tuple[_T, _T]:
     return arg if isinstance(arg, tuple) else (arg, arg)

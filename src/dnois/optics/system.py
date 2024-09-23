@@ -1,4 +1,5 @@
 import abc
+import math
 import warnings
 
 import torch
@@ -10,6 +11,15 @@ from dnois.base.typing import (
     Ts, Size2d, FovSeg, Vector, SclOrVec, Callable,
     size2d, vector, cast, scl_or_vec
 )
+
+__all__ = [
+    'Optics',
+    'Pinhole',
+    'RenderingOptics',
+    'StandardOptics',
+]
+
+_ERMSG_POSITIVE = '{0} must be positive, got {1}'
 
 
 class Optics(nn.Module, metaclass=abc.ABCMeta):
@@ -23,38 +33,51 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         self,
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
+        nominal_focal_length: float = None,
     ):
         super().__init__()
         pixel_num = size2d(pixel_num)
         if not isinstance(pixel_size, tuple):
             pixel_size = (pixel_size, pixel_size)
-        if any(n < 0 for n in pixel_num):
-            raise ValueError(f'Number of pixels must be positive, got {pixel_num}')
-        if any(s < 0 for s in pixel_size):
-            raise ValueError(f'Pixel size must be positive, got {pixel_size}')
+        if any(n <= 0 for n in pixel_num):
+            raise ValueError(_ERMSG_POSITIVE.format('Number of pixels', pixel_num))
+        if any(s <= 0 for s in pixel_size):
+            raise ValueError(_ERMSG_POSITIVE.format('Pixel size', pixel_size))
+        if nominal_focal_length is not None and nominal_focal_length <= 0:
+            raise ValueError(_ERMSG_POSITIVE.format('Nominal focal length', nominal_focal_length))
         #: Numbers of pixels in vertical and horizontal directions.
         self.pixel_num: tuple[int, int] = pixel_num
         #: Height and width of a pixel in meters.
         self.pixel_size: tuple[float, float] = pixel_size
+        #: Focal length of the reference model.
+        self.nominal_focal_length: float | None = nominal_focal_length
 
-    @abc.abstractmethod
     @property
+    @abc.abstractmethod
     def reference(self) -> 'Pinhole':
         pass
 
+    @property
+    def sensor_size(self) -> tuple[float, float]:
+        return self.pixel_size[0] * self.pixel_num[0], self.pixel_size[1] * self.pixel_num[1]
+
 
 class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
+    optical_infinity: float = 1e3  #: Optical "infinite" depth.
+
     def __init__(
         self,
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
+        nominal_focal_length: float = None,
         wavelength: Vector = None,
         fov_segments: FovSeg | Size2d = 'paraxial',
         depth: SclOrVec | tuple[Ts, Ts] = None,
         depth_aware: bool = False,
         polarized: bool = False,
+        coherent: bool = False,
     ):
-        super().__init__(pixel_num, pixel_size)
+        super().__init__(pixel_num, pixel_size, nominal_focal_length)
         if not isinstance(fov_segments, str):
             fov_segments = size2d(fov_segments)
         if wavelength is None:
@@ -71,6 +94,7 @@ class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
         self.fov_segments: FovSeg | tuple[int, int] = fov_segments
         self.depth_aware: bool = depth_aware  #: Whether to render images in a depth-aware manner.
         self.polarized: bool = polarized  #: Whether supports polarization-aware imaging.
+        self.coherent: bool = coherent  #: Whether this system is coherent
 
         self.register_buffer('wavelength', wavelength, False)
         self.wavelength: Ts = wavelength  #: Wavelengths considered.
@@ -98,7 +122,7 @@ class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
         if self.fov_segments == 'paraxial':
             return self.conv_render(scene)
         elif self.fov_segments == 'pointwise':
-            return self.point_render(scene)
+            return self.pointwise_render(scene)
         else:
             return self.patchwise_render(scene, cast(tuple[int, int], self.fov_segments))
 
@@ -152,6 +176,10 @@ class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
                 idx = torch.multinomial(probabilities, 1).squeeze().item()
             return depth[idx]
 
+    @property
+    def device(self) -> torch.device:
+        return self.wavelength.device
+
     def _check_scene(self, scene: _sc.Scene):
         if not isinstance(scene, _sc.ImageScene):
             raise RuntimeError(f'{self.__class__.__name__} only supports ImageScene at present')
@@ -166,10 +194,9 @@ class Pinhole(StandardOptics):
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
     ):
-        super().__init__(pixel_num, pixel_size)
+        super().__init__(pixel_num, pixel_size, focal_length)
         if focal_length <= 0:
-            raise ValueError(f'Focal length must be positive, got {focal_length}')
-        self.focal_length: float = focal_length  #: Focal length in meters.
+            raise ValueError(_ERMSG_POSITIVE.format('Focal length', focal_length))
 
     @property
     def reference(self) -> 'Pinhole':
@@ -204,12 +231,26 @@ class Pinhole(StandardOptics):
         return i
 
     @property
-    def fov_full(self) -> Ts:
+    def focal_length(self) -> float:
+        return self.nominal_focal_length
+
+    @property
+    def fov_full(self) -> float:
         return self.fov_half * 2
 
     @property
-    def fov_half(self) -> Ts:
-        half_h = torch.tensor(self.pixel_size[0] * self.pixel_num[0]) / 2
-        half_w = torch.tensor(self.pixel_size[1] * self.pixel_num[1]) / 2
-        tan = torch.sqrt(half_h.square() + half_w.square()) / self.focal_length
-        return tan.atan().rad2deg()
+    def fov_half(self) -> float:
+        half_h = self.pixel_size[0] * (self.pixel_num[0] - 1) / 2
+        half_w = self.pixel_size[1] * (self.pixel_num[1] - 1) / 2
+        tan = math.sqrt(half_h * half_h + half_w * half_w) / self.focal_length
+        return math.atan(tan)
+
+    @property
+    def fov_half_x(self) -> float:
+        half_w = self.pixel_size[1] * (self.pixel_num[1] - 1) / 2
+        return math.atan(half_w / self.focal_length)
+
+    @property
+    def fov_half_y(self) -> float:
+        half_h = self.pixel_size[0] * (self.pixel_num[0] - 1) / 2
+        return math.atan(half_h / self.focal_length)
