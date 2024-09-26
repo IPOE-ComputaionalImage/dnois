@@ -13,7 +13,7 @@ Fourier transform
 .. py:currentmodule:: dnois.fourier
 
 .. autosummary::
-    :toctree: _stub/ft/ft
+    :toctree: ../generated/ft/ft
 
     ft1
     ift1
@@ -31,7 +31,7 @@ Convolution
 TODO: other conv functions
 
 .. autosummary::
-    :toctree: _stub/ft/conv
+    :toctree: ../generated/ft/conv
 
     conv1
     conv2

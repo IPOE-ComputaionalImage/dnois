@@ -4,10 +4,9 @@ import collections.abc
 import torch
 from torch import nn
 
-from dnois import mt
-from dnois.base.typing import Sequence, Ts, Any, Callable, Literal, Scalar, scalar
-
-from .ray import BatchedRay, NoValidRayError
+from .ray import BatchedRay
+from ... import mt
+from ...base.typing import Sequence, Ts, Any, Callable, Literal, Scalar, scalar
 
 __all__ = [
     'NT_EPSILON',
@@ -16,9 +15,10 @@ __all__ = [
     'NT_THRESHOLD_STRICT',
     'NT_UPDATE_BOUND',
 
+    'CircularSurface',
     'Context',
-    'SurfaceList',
     'Surface',
+    'SurfaceList',
 ]
 
 NT_MAX_ITERATION: int = 10
@@ -92,32 +92,42 @@ class Context:
 
 class Surface(nn.Module, metaclass=abc.ABCMeta):
     r"""
-    Base class for optical surfaces with circular apertures in a lens group.
+    Base class for optical surfaces in a group of lens.
     The position of a surface in a lens group is specified by a single z-coordinate,
     which is called its *baseline*. Baseline of the first surface is 0.
 
     The geometric shape of a surface is described by an equation
-    :math:`z=h(x,y;\mathbf{\theta})+z_\text{baseline}`, which has different form
-    for each surface types. The function :math:`h`, called *surface function*,
-    is a 2D function of lateral coordinates :math:`(x,y)` which depends on
-    parameters of the surface :math:`\mathbf{\theta`} and satisfies :math:`h(0,0)=0`.
+    :math:`z=h(x,y)+z_\text{baseline}`, which has different forms
+    for each surface type. The function :math:`h`, called *surface function*,
+    is a 2D function of lateral coordinates :math:`(x,y)` which satisfies :math:`h(0,0)=0`.
+    Note that the surface function also depends on the parameters of the surface implicitly.
+
+    To ensure that a ray propagating along z-axis must have an intersection with
+    the surface, an extended surface function (see :py:meth:`~h_extended`)
+    is computed to find the intersection. Normally, the definition domain of
+    surface function covers the aperture so an extended surface does not
+    affect actual surface. If it cannot cover the aperture, however, the
+    actual surface will be extended, which is usually undesired.
+    At present a warning will be issued if that case is detected.
+
+    This is subclass of :py:class:`torch.nn.Module`.
 
     .. note::
 
         All the quantities with length dimension is represented in meters.
         They include value of coordinates, optical path length and wavelength, etc.
 
-    :param float radius: Radius of aperture of the surface.
     :param material: Material following the surface. Either a :py:class:`~dnois.mt.Material`
         instance or a str representing the name of a registered material.
     :type material: :py:class:`~dnois.mt.Material` or str
-    :param float distance: Distance between the surface and the next one.
-    :param dict newton_config: Configuration for Newton's method. TODO
+    :param distance: Distance between the surface and the next one.
+    :type distance: float or Tensor
+    :param dict newton_config: Configuration for Newton's method.
+        See :ref:`configuration_for_newtons_method` for details.
     """
 
     def __init__(
         self,
-        radius: float,
         material: mt.Material | str,
         distance: Scalar,
         newton_config: dict[str, Any] = None
@@ -128,7 +138,6 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
             raise ValueError('distance must not be negative')
         if newton_config is None:
             newton_config = {}
-        self.radius: float = radius  #: Radius of circular aperture of the surface.
         #: Material following the surface.
         self.material: mt.Material = material if isinstance(material, mt.Material) else mt.get(material)
         #: Distance between the surface and the next one.
@@ -145,62 +154,113 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         self._nt_epsilon = newton_config.get('epsilon', NT_EPSILON)
 
     @abc.abstractmethod
-    def h(self, x: Ts, y: Ts = None) -> Ts:  # TODO: use typing.overload
+    def h(self, x: Ts, y: Ts) -> Ts:
         r"""
-        Compute surface function :math:`h(x,y;\mathbf{\theta})`.
+        Computes surface function :math:`h(x,y)`.
 
-        :param x:
-        :param y:
-        :return:
+        :param Tensor x: x coordinate.
+        :param Tensor y: y coordinate.
+        :return: Corresponding value of the surface function.
+        :rtype: Tensor
         """
         pass
 
     @abc.abstractmethod
-    def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
+    def h_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
         r"""
-        Compute the partial derivatives of surface function
-        :math:`\pfrac{h(x,y;\mathbf{\theta})}{x}` and :math:`\pfrac{h(x,y;\mathbf{\theta})}{y}`.
+        Computes the partial derivatives of surface function
+        :math:`\pfrac{h(x,y)}{x}` and :math:`\pfrac{h(x,y)}{y}`.
 
-        :param x:
-        :param y:
-        :param r2:
-        :return:
+        :param Tensor x: x coordinate.
+        :param Tensor y: y coordinate.
+        :return: Corresponding value of two partial derivatives.
+        :rtype: tuple[Tensor, Tensor]
         """
         pass
 
-    @property
     @abc.abstractmethod
-    def geo_radius(self) -> Ts:
+    def h_extended(self, x: Ts, y: Ts) -> Ts:
+        r"""
+        Computes extended surface function:
+
+        .. math::
+
+            \tilde{h}(x,y)=\left\{\begin{array}{ll}
+                h(x,y) & \text{if}(x,y)\in\text{dom} h,\\
+                \text{extended value} & \text{else}
+            \end{array}\right.
+
+        :param Tensor x: x coordinate.
+        :param Tensor y: y coordinate.
+        :return: Corresponding value of extended surface function.
+        :rtype: Tensor
+        """
         pass
 
-    def h_extended(self, x: Ts, y: Ts = None) -> Ts:
-        r2 = x if y is None else x.square() + y.square()
-        lim2 = self.geo_radius.square()
-        return torch.where(r2 <= lim2, self.h(r2), self.h(lim2))
+    @abc.abstractmethod
+    def h_grad_extended(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        r"""
+        Computes partial derivatives of extended surface function:
+        :math:`\pfrac{\tilde{h}(x,y)}{x}` and :math:`\pfrac{\tilde{h}(x,y)}{y}`.
+        See :py:meth:`~h_extended`.
 
-    def h_grad_extended(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
-        if r2 is None:
-            r2 = x.square() + y.square()
-        lim2 = self.geo_radius.square()
-        phpx, phpy = self.h_grad(x, y, r2)
-        mask = r2 <= lim2
-        return torch.where(mask, phpx, 0), torch.where(mask, phpy, r2)
+        :param Tensor x: x coordinate.
+        :param Tensor y: y coordinate.
+        :return: Corresponding value of two partial derivatives.
+        :rtype: tuple[Tensor, Tensor]
+        """
+        pass
+
+    @abc.abstractmethod
+    def _valid(self, ray: BatchedRay) -> Ts:
+        """
+        Checks whether given rays whose origins are on the surface are valid.
+
+        :param BatchedRay ray: Rays to be checked.
+        :return: Flags of validity.
+        :rtype: torch.BoolTensor
+        """
+        pass
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        """
+        Returns the refracted rays of a group of incident rays ``ray``.
+        The directions of rays are determined by ``forward`` and the rays
+        with incorrect direction will be marked as invalid.
+
+        :param BatchedRay ray: Incident rays.
+        :param bool forward: Whether the incident rays propagate along positive-z direction.
+        :return: Refracted rays with origin on this surface.
+            A new :py:class:`~BatchedRay` object.
+        :rtype: BatchedRay
+        """
         magnitude = self._nt_threshold_strict / torch.finfo(ray.o.dtype).eps
         if torch.abs(ray.z - self.context.z).gt(magnitude).any():
             new_z = self.context.z - magnitude if forward else self.context.z + magnitude
             ray.march_to_(new_z, self.context.material_before.n(ray.wl, 'm'))
 
         if forward:
-            valid = torch.logical_and(self._eval_f(ray) >= 0, ray.d_z > 0)
+            valid = torch.logical_and(self._f(ray) >= 0, ray.d_z > 0)
         else:
-            valid = torch.logical_and(self._eval_f(ray) <= 0, ray.d_z < 0)
+            valid = torch.logical_and(self._f(ray) <= 0, ray.d_z < 0)
         ray.update_valid_(valid, 'copy')
 
-        return self.refract(self.intersect(ray), forward)
+        return self.refract(self.intercept(ray), forward)
 
-    def intersect(self, ray: BatchedRay) -> BatchedRay:
+    def intercept(self, ray: BatchedRay) -> BatchedRay:
+        """
+        Returns a new :py:class:`~BatchedRay` whose directions are identical to those
+        of ``ray`` and origins are the intersections of ``ray`` and this surface.
+        The intersections are solved by `Newton's method
+        <https://en.wikipedia.org/wiki/Newton's_method>`_ .
+        The rays for which no intersection with sufficient precision, within the aperture
+        and resulted from a positive marching distance will be marked as invalid.
+
+        :param BatchedRay ray: Incident rays.
+        :return: Intercepted rays.
+        :rtype: BatchedRay
+        """
+        # TODO: optimize
         t = (self.context.z - ray.z) / ray.d_z
         cnt = 0  # equal to numbers of derivative computation
         new_ray = ray.clone(False)
@@ -208,48 +268,73 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         with torch.no_grad():
             while True:
                 new_ray.o = ray.o + new_ray.d_norm * t.unsqueeze(-1)  # do not compute opl for root finder
-                r2 = new_ray.x.square() + new_ray.y.square()
-                f_value = self._eval_f(new_ray, r2)
+                f_value = self._f(new_ray)
                 if torch.all(f_value.abs() < self._nt_threshold) or cnt >= self._nt_max_iteration:
                     break
 
-                t = t - self._newton_descent(new_ray, f_value, r2)
+                t = t - self._newton_descent(new_ray, f_value)
                 cnt += 1
 
         # the second argument cannot be replaced by f_value because of computational graph
-        r2 = new_ray.x.square() + new_ray.y.square()
-        t = t - self._newton_descent(new_ray, self._eval_f(new_ray, r2), r2)
+        t = t - self._newton_descent(new_ray, self._f(new_ray))
         ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
         ray.update_valid_(
-            self._valid(ray.x, ray.y) &
-            (self._eval_f(ray).abs() < self._nt_threshold_strict) &
+            self._valid(ray) &
+            (self._f(ray).abs() < self._nt_threshold_strict) &
             (t > 0), 'copy'
         )
         return ray
 
-    def normal(self, x: Ts, y: Ts, r2: Ts = None) -> Ts:
+    def normal(self, x: Ts, y: Ts) -> Ts:
         """
-        Point to positive z. unit vector. TODO
+        Returns unit normal vector of the surface pointing to positive-z direction,
+        i.e., from before the surface to behind it.
 
-        :param x:
-        :param y:
-        :param r2:
-        :return:
+        :param Tensor x: x coordinate.
+        :param Tensor y: y coordinate.
+        :return: A tensor whose shape depends on ``x`` and ``y``, with an additional
+            dimension of size 3 following.
+        :rtype: Tensor
         """
-        phpx, phpy = self.h_grad(x, y, r2)
+        phpx, phpy = self.h_grad(x, y)
         f_grad = torch.stack((-phpx, -phpy, torch.ones_like(phpx)), dim=-1)
         return f_grad / f_grad.norm(2, -1, True)
 
     def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        r"""
+        Returns a new :py:class:`~BatchedRay` whose origins are identical to those
+        of ``ray`` and directions are refracted by this surface.
+        Refracted directions are computed by following equation:
+
+        .. math::
+
+            \mathbf{d}_2=\mu\mathbf{d}_1+\left(
+                \sqrt{1-\mu^2\left(1-(\mathbf{n}\cdot\mathbf{d}_1)^2\right)}-
+                \mu\mathbf{n}\cdot\mathbf{d}_1
+            \right)\mathbf{n}
+
+        where :math:`\mathbf{d}_1` and :math:`\mathbf{d}_2` are unit vectors of
+        incident and refracted directions, :math:`\mu=n_1/n_2` is the ratio of
+        refractive indices and :math:`\mathbf{n}` is unit normal vector of the surface,
+        which is exactly :py:meth:`~normal`. Note that this equation applies only
+        to forward ray tracing.
+        The rays making the expression under the square root negative will be
+        marked as invalid.
+
+        :param BatchedRay ray: Incident rays.
+        :param bool forward: Whether the incident rays propagate along positive-z direction.
+        :return: Refracted rays with origin on this surface.
+            A new :py:class:`~BatchedRay` object.
+        :rtype: BatchedRay
+        """
         ray = ray.clone(False)
         n = self.normal(ray.x, ray.y)
-        if not forward:
-            n = -n
         i = ray.d_norm
         if forward:
             miu = self.context.material_before.n(ray.wl, 'm') / self.material.n(ray.wl, 'm')
         else:
             miu = self.material.n(ray.wl, 'm') / self.context.material_before.n(ray.wl, 'm')
+            n = -n
         miu = miu.unsqueeze(-1)
         ni = torch.sum(n * i, dim=-1).unsqueeze(-1)
         nt2 = 1 - miu.square() * (1 - ni.square())
@@ -258,12 +343,139 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         ray.update_valid_(nt2.squeeze(-1) > 0, 'copy').norm_d_()
         return ray
 
+    @property
+    def device(self) -> torch.device:
+        """
+        Device of this object.
+
+        :type: torch.device
+        """
+        return self.distance.device
+
+    def _f(self, ray: BatchedRay) -> Ts:
+        return self.h_extended(ray.x, ray.y) + self.context.z - ray.z
+
+    def _f_grad(self, ray: BatchedRay) -> Ts:
+        phpx, phpy = self.h_grad_extended(ray.x, ray.y)
+        return torch.stack((phpx, phpy, -torch.ones_like(phpx)), dim=-1)
+
+    def _newton_descent(self, ray: BatchedRay, f_value: Ts) -> Ts:
+        derivative_value = torch.sum(ray.d_norm * self._f_grad(ray), dim=-1)
+        descent = f_value / (derivative_value + self._nt_epsilon)
+        descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
+        return descent
+
+
+class CircularSurface(Surface, metaclass=abc.ABCMeta):
+    r"""
+    Derived class of :py:class:`~Surface` for optical surfaces
+    with circular symmetry, i.e. its property
+    depends only on the radial distance :math:`r=\sqrt{x^2+y^2}`, in a group of lens.
+    Therefore, their surface function can be written as
+    :math:`h(x,y)=\hat{h}(x^2+y^2)=\hat{h}(r^2)`.
+    Note that :math:`\hat{h}`
+    takes as input squared radial distance for computational efficiency purpose.
+
+    :param float radius: Radius of aperture of the surface.
+    :param material: Material following the surface. Either a :py:class:`~dnois.mt.Material`
+        instance or a str representing the name of a registered material.
+    :type material: :py:class:`~dnois.mt.Material` or str
+    :param distance: Distance between the surface and the next one.
+    :param dict newton_config: Configuration for Newton's method.
+        See :ref:`configuration_for_newtons_method` for details.
+    """
+
+    def __init__(
+        self,
+        radius: float,
+        material: mt.Material | str,
+        distance: Scalar,
+        newton_config: dict[str, Any] = None
+    ):
+        super().__init__(material, distance, newton_config)
+        self.radius: float = radius  #: Radius of circular aperture of the surface.
+
+    @abc.abstractmethod
+    def h_r2(self, r2: Ts) -> Ts:
+        r"""
+        Computes surface function :math:`\hat{h}(r^2)`.
+
+        :param Tensor r2: Squared radial distance.
+        :return: Corresponding value of the surface function.
+        :rtype: Tensor
+        """
+        pass
+
+    @abc.abstractmethod
+    def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
+        r"""
+        Computes the partial derivatives of surface function
+        :math:`\pfrac{h(x,y)}{x}` and :math:`\pfrac{h(x,y)}{y}`.
+
+        :param Tensor x: x coordinate.
+        :param Tensor y: y coordinate.
+        :param Tensor r2: Squared radial distance. It can be passed in to avoid
+            repeated computation if already computed outside this method.
+        :return: Corresponding value of two partial derivatives.
+        :rtype: tuple[Tensor, Tensor]
+        """
+        pass
+
+    @property
+    @abc.abstractmethod
+    def geo_radius(self) -> Ts:
+        """
+        Geometric radius of the surface, i.e. maximum radial distance that makes
+        the surface function mathematically meaningful. A 0D tensor.
+
+        :type: Tensor
+        """
+        pass
+
+    def h(self, x: Ts, y: Ts) -> Ts:
+        return self.h_r2(x.square() + y.square())
+
+    def h_extended(self, x: Ts, y: Ts) -> Ts:
+        return self.h_extended_r2(x.square() + y.square())
+
+    def h_grad_extended(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
+        r"""
+        Computes partial derivatives of extended surface function:
+        :math:`\pfrac{\tilde{h}(x,y)}{x}` and :math:`\pfrac{\tilde{h}(x,y)}{y}`.
+        See :py:meth:`~h_extended`.
+
+        :param Tensor x: x coordinate.
+        :param Tensor y: y coordinate.
+        :param Tensor r2: Squared radial distance. It can be passed in to avoid
+            repeated computation if already computed outside this method.
+        :return: Corresponding value of two partial derivatives.
+        :rtype: tuple[Tensor, Tensor]
+        """
+        if r2 is None:
+            r2 = x.square() + y.square()
+        lim2 = self.geo_radius.square()
+        phpx, phpy = self.h_grad(x, y, r2)
+        mask = r2 <= lim2
+        return torch.where(mask, phpx, 0), torch.where(mask, phpy, r2)
+
+    def h_extended_r2(self, r2: Ts) -> Ts:
+        r"""
+        Computes extended version of :math:`\hat{h}(r^2)`.
+        See :py:meth:`~h_r2` and :py:meth:`~h_extended`.
+        """
+        lim2 = self.geo_radius.square()
+        return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2))
+
     def sample(
         self, n: tuple[int, int],
         mode: Literal['rectangular', 'circular'],
         sampling_curve: Callable[[Ts], Ts] = None,
         **kwargs
     ) -> tuple[Ts, Ts]:
+        """
+        Sample points on the baseline plane in a regular grid.
+        This method is subject to change.
+        """
         if mode == 'circular':
             t = torch.arange(n[0], **kwargs).unsqueeze(0) / n[0] * (2 * torch.pi)
             r = torch.linspace(1 / n[1], SAMPLE_LIMIT, n[1], **kwargs).unsqueeze(1)
@@ -282,6 +494,10 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
             raise ValueError(f'Unknown mode: {mode}')
 
     def sample_random(self, n: int, sampling_curve: Callable[[Ts], Ts] = None, **kwargs) -> tuple[Ts, Ts]:
+        """
+        Sample points on the baseline plane randomly.
+        This method is subject to change.
+        """
         t = torch.rand(n, **kwargs) * (2 * torch.pi)
         r = torch.rand(n, **kwargs)
         if sampling_curve is not None:
@@ -289,32 +505,36 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         r = r * self.radius
         return r * t.cos(), r * t.sin()
 
-    @property
-    def device(self) -> torch.device:
-        return self.distance.device
+    def _valid(self, ray: BatchedRay) -> Ts:
+        return ray.r2 <= self.radius ** 2
 
-    def _eval_f(self, ray: BatchedRay, r2: Ts = None) -> Ts:
-        if r2 is None:
-            r2 = ray.x.square() + ray.y.square()
-        return self.h_extended(r2) + self.context.z - ray.z
+    def _f(self, ray: BatchedRay) -> Ts:
+        return self.h_extended_r2(ray.r2) + self.context.z - ray.z
 
-    def _eval_f_grad(self, ray: BatchedRay, r2: Ts = None) -> Ts:
-        if r2 is None:
-            r2 = ray.x.square() + ray.y.square()
-        phpx, phpy = self.h_grad_extended(ray.x, ray.y, r2)
+    def _f_grad(self, ray: BatchedRay) -> Ts:
+        phpx, phpy = self.h_grad_extended(ray.x, ray.y, ray.r2)
         return torch.stack((phpx, phpy, -torch.ones_like(phpx)), dim=-1)
 
-    def _valid(self, x: Ts, y: Ts) -> Ts:
-        return x.square() + y.square() < self.radius ** 2
-
-    def _newton_descent(self, ray: BatchedRay, f_value: Ts, r2: Ts = None) -> Ts:
-        derivative_value = torch.sum(ray.d_norm * self._eval_f_grad(ray, r2), dim=-1)
+    def _newton_descent(self, ray: BatchedRay, f_value: Ts) -> Ts:
+        derivative_value = torch.sum(ray.d_norm * self._f_grad(ray), dim=-1)
         descent = f_value / (derivative_value + self._nt_epsilon)
         descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
         return descent
 
 
-class SurfaceList(nn.Module, collections.abc.MutableSequence):
+class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
+    """
+    A sequential container of surfaces. This class is derived from
+    :py:class:`torch.nn.ModuleList` and implements
+    :py:class:`collections.abc.MutableSequence` interface.
+    So its instance can be regarded as both a PyTorch module
+    and a list of :py:class:`Surface`.
+
+    :param surfaces: A sequence of :py:class:`Surface` objects. Default: ``[]``.
+    :type surfaces: Sequence[Surface]
+    :param env_material: The material before the first surface.
+    :type env_material: :py:class:`~dnois.mt.Material`
+    """
     _force_surface: bool = True
 
     def __init__(
@@ -328,8 +548,8 @@ class SurfaceList(nn.Module, collections.abc.MutableSequence):
         if not isinstance(env_material, mt.Material):
             env_material = mt.get(env_material)
 
-        # This is needed to allow the surfaces to be recognized as submodules of self
-        self._surfaces = nn.ModuleList([])
+        # This is needed to facilitate MutableSequence operations
+        # because torch.nn.ModuleList saves submodules like a dict rather than list
         self._slist: list[Surface] = []
         #: Material before the first surface.
         self.env_material: mt.Material = env_material
@@ -337,99 +557,168 @@ class SurfaceList(nn.Module, collections.abc.MutableSequence):
         self.extend(surfaces)
 
     def __contains__(self, item):
+        """:meta private:"""
         return self._slist.__contains__(item)
 
     def __delitem__(self, key):
+        """:meta private:"""
         self._slist.__getitem__(key).context = None
         self._slist.__delitem__(key)
-        self._surfaces.__delitem__(key)
+        super().__delitem__(key)
 
     def __getitem__(self, item):
+        """:meta private:"""
         return self._slist.__getitem__(item)
 
     def __iadd__(self, other):
-        raise RuntimeError(f'+= for LensGroup is prohibited. Use extend instead')
+        """:meta private:"""
+        self._slist.__iadd__(other)
+        return super().__iadd__(other)
 
     def __iter__(self):
+        """:meta private:"""
         return self._slist.__iter__()
 
     def __len__(self):
+        """:meta private:"""
         return self._slist.__len__()
 
     def __reversed__(self):
+        """:meta private:"""
         return self._slist.__reversed__()
 
     def __setitem__(self, key, value):
+        """:meta private:"""
         self._welcome(value)
         self._slist.__setitem__(key, value)
-        self._surfaces.__setitem__(key, value)
+        super().__setitem__(key, value)
+
+    def __add__(self, other: 'SurfaceList'):
+        """:meta private:"""
+        return SurfaceList(self._slist + other._slist, self.env_material)
+
+    def __repr__(self):
+        """:meta private:"""
+        _repr = super().__repr__()[:-1]  # remove that last parentheses
+        _repr += f'  env_material={repr(self.env_material)}\n)'
+        return _repr
+
+    def __dir__(self):
+        """:meta private:"""
+        return super().__dir__() + ['env_material']
 
     def append(self, surface: Surface):
+        """:meta private:"""
         self._welcome(surface)
         self._slist.append(surface)
-        self._surfaces.append(surface)
+        super().append(surface)
 
     def clear(self):
+        """:meta private:"""
         for s in self._slist:
             s.context = None
         self._slist.clear()
-        self._surfaces = nn.ModuleList([])
+        self._super_clear()
 
     def count(self, value) -> int:
+        """:meta private:"""
         return self._slist.count(value)
 
     def extend(self, surfaces: Sequence[Surface]):
+        """:meta private:"""
         self._welcome(*surfaces)
         self._slist.extend(surfaces)
-        self._surfaces.extend(surfaces)
+        super().extend(surfaces)
 
     def index(self, value, start: int = 0, stop: int = ...) -> int:
+        """:meta private:"""
         if stop is ...:
             return self._slist.index(value, start)
         else:
             return self._slist.index(value, start, stop)
 
     def insert(self, index: int, surface: Surface):
+        """:meta private:"""
         self._welcome(surface)
         self._slist.insert(index, surface)
-        self._surfaces.insert(index, surface)
+        super().insert(index, surface)
 
     def pop(self, index=-1) -> Surface:
+        """:meta private:"""
+        super().pop(index)
         s = self._slist.pop(index)
         s.context = None
-        self._surfaces.__delitem__(index)
         return s
 
     def remove(self, value):
+        """:meta private:"""
         idx = self.index(value)
         self.pop(idx)
 
     def reverse(self):
+        """:meta private:"""
+        for idx in range(len(self)):
+            super().pop()
         self._slist.reverse()
-        self._surfaces = nn.ModuleList(self._slist)
+        self._super_clear()
+        super().extend(self._slist)
+
+    def add_module(self, name: str, module: nn.Module):
+        """:meta private:"""
+        if name.isdigit() and isinstance(module, Surface):
+            idx = self._get_abs_string_index(name)
+            self.insert(idx, module)
+        else:
+            super().add_module(name, module)
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        """
+        Traces rays incident on the first surface and returns rays
+        passing the last surface, or reversely if ``forward`` is ``False``.
+
+        :param BatchedRay ray: Input rays.
+        :param bool forward: Whether rays are forward or not.
+        :return: Output rays.
+        :rtype: BatchedRay
+        """
         for s in (self._slist if forward else reversed(self._slist)):
             try:
                 ray = s(ray, forward)
-            except NoValidRayError as e:
+            except Exception as e:
                 idx = self.index(s)
-                e.add_note(f'Valid rays vanish during the forward pass of surface {idx}')
+                e.add_note(f'This exception is raised during the forward pass of surface {idx}')
                 raise e
         return ray
 
     @property
     def surfaces(self) -> list[Surface]:
+        """
+        Returns a list of contained surfaces.
+
+        :type: list[Surface]
+        """
         return [s for s in self._slist]
 
     @property
     def length(self) -> Ts | None:
+        """
+        Returns the distance between baselines of the first and the last surfaces
+        as a 0D tensor. If there is no more than one surface, returns ``None``.
+
+        :type: Tensor or None
+        """
         if len(self._slist) < 2:
             return None
         return sum(s.distance for s in self._slist[:-1])
 
     @property
     def total_length(self) -> Ts | None:
+        """
+        Returns the sum of :py:attr:`Surface.distance` of all the surfaces
+        as a 0D tensor. If there is no surface, returns ``None``.
+
+        :type: Tensor or None
+        """
         if len(self._slist) == 0:
             return None
         return sum(s.distance for s in self._slist)
@@ -447,3 +736,7 @@ class SurfaceList(nn.Module, collections.abc.MutableSequence):
             for s2 in new:
                 if id(s1) == id(s2):
                     raise ValueError('Trying to add a surface into a lens group containing it')
+
+    def _super_clear(self):
+        for idx in range(len(self) - 1, -1, -1):
+            super().__delitem__(idx)

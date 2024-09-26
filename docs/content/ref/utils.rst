@@ -7,7 +7,7 @@ Utilities
 Creating grid
 *********************************
 .. autosummary::
-    :toctree: _stub/utils/grid
+    :toctree: ../generated/utils/grid
 
     sym_grid
     sym_interval
@@ -16,7 +16,7 @@ Creating grid
 Image manipulation
 *****************************
 .. autosummary::
-    :toctree: _stub/utils/image
+    :toctree: ../generated/utils/image
 
     crop
     pad
@@ -29,7 +29,7 @@ Image manipulation
 Computation
 **********************************
 .. autosummary::
-    :toctree: _stub/utils/computation
+    :toctree: ../generated/utils/computation
 
     abs2
     expi
@@ -38,6 +38,6 @@ Computation
 PyTorch Module
 *********************************
 .. autosummary::
-    :toctree: _stub/utils/module
+    :toctree: ../generated/utils/module
 
     WrapperModule

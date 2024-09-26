@@ -7,6 +7,9 @@ All the material classes are derived from :py:class:`Material` and share its
 constructor arguments. They have also a method :py:meth:`~Material.n`
 to compute the refractive index for given wavelength. Each class implements
 this method by its own dispersion formula.
+
+This module maintains a material library to add, delete or retrieve materials.
+See :ref:`accessing_materials`.
 """
 # TODO: declare source: Zemax manual
 
@@ -157,7 +160,7 @@ class Constant(Material):
 
 class Cauchy(Material):
     r"""
-    The material class for which Cauchy formula is applicable:
+    Material for which Cauchy formula:
 
     .. math::
         n=A+\frac{B}{\lambda^2}+\frac{C}{\lambda^4}
@@ -192,7 +195,7 @@ class Cauchy(Material):
 
 class Schott(Material):
     r"""
-    The material class for which Schott formula is applicable:
+    Materials described by Schott formula:
 
     .. math::
         n^2=a_0+a_1\lambda^2+a_2\lambda^{-2}+a_3\lambda^{-4}+a_4\lambda^{-6}+a_5\lambda^{-8}
@@ -256,7 +259,7 @@ class _Sellmeier(Material):
 def _make_sellmeier(num: int, n_terms: int) -> type[_Sellmeier]:
     cls = type(f'Sellmeier{num}', (_Sellmeier,), {'_n_terms': n_terms})
     cls.__doc__ = fr"""
-    The material class for which Sellmeier{num} formula is applicable:
+    Materials described by Sellmeier{num} formula:
 
     .. math::
         n^2-1=\sum_{{i=1}}^{n_terms}\frac{{K_i\lambda^2}}{{\lambda^2-L_i}}
@@ -274,7 +277,7 @@ Sellmeier5 = _make_sellmeier(5, 5)
 
 class Sellmeier2(Material):
     r"""
-    The material class for which Sellmeier2 formula is applicable:
+    Materials described by Sellmeier2 formula:
 
     .. math::
         n^2-1=A+\frac{B_1\lambda^2}{\lambda^2-\lambda_1^2}+\frac{B_2}{\lambda^2-\lambda_2^2}
@@ -314,7 +317,7 @@ class Sellmeier2(Material):
 
 class Sellmeier4(Material):
     r"""
-    The material class for which Sellmeier4 formula is applicable:
+    Materials described by Sellmeier4 formula:
 
     .. math::
         n^2=A+\frac{B\lambda^2}{\lambda^2-C}+\frac{D\lambda^2}{\lambda^2-E}
@@ -356,7 +359,7 @@ class Sellmeier4(Material):
 
 class Herzberger(Material):
     r"""
-    The material class for which Herzberger formula is applicable:
+    Materials described by Herzberger formula:
 
     .. math::
         n=A+BL+CL^2+D\lambda^2+E\lambda^4+F\lambda^6,\\
@@ -390,7 +393,7 @@ class Herzberger(Material):
 
 class Conrady(Material):
     r"""
-    The material class for which Conrady formula is applicable:
+    Materials described by Conrady formula:
 
     .. math::
         n=n_0+\frac{A}{\lambda}+\frac{B}{\lambda^{3.5}}
@@ -422,7 +425,7 @@ class Conrady(Material):
                 f'B={self.b:.{precision}f}')
 
 
-vacuum = Constant('vacuum', 1.)
+vacuum: Constant = Constant('vacuum', 1.)  #: Vacuum.
 _lib = {
     'vacuum': vacuum,
 }
@@ -430,7 +433,7 @@ _lib = {
 
 def get(name: str, default_none: bool = False) -> Union[Material, None]:
     """
-    Get material by name.
+    Get material by name from material library.
 
     :param str name: Name of the material.
     :param bool default_none: If true, return ``None`` when the material does not exist.
@@ -448,7 +451,7 @@ def get(name: str, default_none: bool = False) -> Union[Material, None]:
 
 def register(name: str, material: Material):
     """
-    Add a new class of material.
+    Add a new class of material into material library.
 
     :param str name: Name of the material.
     :param Material material: The material instance.
@@ -476,7 +479,7 @@ def refractive_index(wavelength: Numeric, material: str, unit='m') -> Numeric:
 
 def is_available(name: str) -> bool:
     """
-    Check if given material is available.
+    Check if given material is available in material library.
 
     :param str name: Name of the material.
     :return: If the material is available.
@@ -487,7 +490,7 @@ def is_available(name: str) -> bool:
 
 def list_all() -> list[str]:
     """
-    List all available materials.
+    List all available materials in material library.
 
     :return: List of the names of available materials.
     :rtype: list[str]
@@ -496,6 +499,14 @@ def list_all() -> list[str]:
 
 
 def remove(name: str, ignore_if_absent: bool = False):
+    """
+    Remove a material from material library.
+
+    :param str name: Name of the material.
+    :param bool ignore_if_absent: If true, ignore material if it does not exist.
+        A :py:exc:`KeyError` will be raised otherwise.
+    :return: None
+    """
     if name in _lib:
         del _lib[name]
     elif not ignore_if_absent:

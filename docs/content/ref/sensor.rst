@@ -8,7 +8,7 @@ Sensor
 Sensor model
 ************************************
 .. autosummary::
-    :toctree: _stub/sensor
+    :toctree: ../generated/sensor
 
     cfa_collect
     cfa_flatten
@@ -21,6 +21,6 @@ Sensor model
 Noise
 ***********************************
 .. autosummary::
-    :toctree: _stub/sensor/noise
+    :toctree: ../generated/sensor/noise
 
     gaussian

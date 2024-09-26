@@ -7,3 +7,8 @@
 User Guide
 ###############################
 TODO
+
+.. toctree::
+    :maxdepth: 2
+
+    guide/imodel

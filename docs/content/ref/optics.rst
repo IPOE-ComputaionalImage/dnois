@@ -4,15 +4,32 @@ Optical System
 
 .. automodule:: dnois.optics
 
-This page is divided into two parts: :ref:`psf_c` and :ref:`img_f`.
-By :ref:`img_f` we mean computing the radiance field reaching the sensor plane
-given PSF of the optics and scene information.
-
-.. _psf_c:
+.. _modeling_optical_systems:
 
 ************************************
-Point spread function calculation
+Modeling optical systems
 ************************************
+
+.. _abstract_models:
+
+Abstract models
+====================================
+TODO
+
+.. autosummary::
+    :toctree: ../generated/optics/abstract
+
+    Pinhole
+    RenderingOptics
+    StandardOptics
+
+Implemented models
+=====================================
+
+The optical response of a given system varies when different ways
+are chosen to model it. Currently, there are two categories of methods
+to model optical systems: :doc:`optics/df` and :doc:`optics/rt`.
+The following content implements :ref:`abstract_models` in these two ways.
 
 .. toctree::
     :maxdepth: 2
@@ -20,7 +37,7 @@ Point spread function calculation
     optics/df
     optics/rt
 
-.. _img_f:
+.. _image_formation:
 
 ***********************************
 Image formation

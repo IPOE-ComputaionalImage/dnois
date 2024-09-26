@@ -28,9 +28,28 @@ def _check_arg(arg: Any, n1: str, n2: str):
 
 
 class SequentialRayTracing(RenderingOptics):
+    """
+    A class of sequential and ray-tracing-based optical system model.
+
+    :param SurfaceList surfaces: Optical surfaces.
+    :param samples_per_point: Number of sampling rays for each object point.
+        A single int for ``random`` mode or a 2-tuple of ints
+        for ``rectangular`` and ``circular`` mode.
+    :type samples_per_point: int or tuple[int, int]
+    :param str sampling_mode: Mode for sampling rays. Choices (default: ``random``):
+
+        ``random``
+            Rays are sampled randomly (see :py:meth:`Surface.sample_random`).
+
+        ``rectangular``
+            Rays are sampled on evenly spaced rectangular grid.
+
+        ``circular``
+            Rays are sampled on evenly spaced circular grid.
+    """
     def __init__(
         self,
-        lens_group: SurfaceList,
+        surfaces: SurfaceList,
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
         nominal_focal_length: float = None,
@@ -53,7 +72,7 @@ class SequentialRayTracing(RenderingOptics):
         elif isinstance(samples_per_point, tuple) and sampling_mode == 'random':
             raise TypeError(f'A single int expected for samples_per_point when sampling_mode is '
                             f'random, got {samples_per_point}')
-        self.surface_list: SurfaceList = lens_group  #: Surface list.
+        self.surfaces: SurfaceList = surfaces  #: Surface list.
         #: Number of sampling rays when computing a PSF.
         #: A single int for random sample, or a pair of int representing
         #: the numbers along two directions.
@@ -80,7 +99,7 @@ class SequentialRayTracing(RenderingOptics):
         if self.wavelength.numel() != scene.n_wl:
             raise ValueError(f'A scene with {self.wavelength.numel()} wavelengths expected, '
                              f'got {scene.n_wl}')
-        if len(self.surface_list) == 0:
+        if len(self.surfaces) == 0:
             raise RuntimeError(f'No surface available')
 
         scene = scene.batch()
@@ -104,15 +123,15 @@ class SequentialRayTracing(RenderingOptics):
         x = x * math.tan(rm.fov_half_x) * depth
         y = torch.linspace(1, -1, n_h, device=device).unsqueeze(-1)  # from top to bottom
         y = y * math.tan(rm.fov_half_y) * depth
+        o = torch.stack([x, y, -depth], -1)  # B x H x W x 3
         # TODO: currently depth=0 plane is assumed to be z=0 plane, which is incorrect
 
         if self.sampling_mode == 'random':
-            x0, y0 = self.surface_list[0].sample_random(self.samples_per_point, device=device)
+            x0, y0 = self.surfaces[0].sample_random(self.samples_per_point, device=device)
         else:
-            x0, y0 = self.surface_list[0].sample(self.samples_per_point, self.sampling_mode, device=device)
+            x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode, device=device)
         spp = x0.numel()
         points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1)  # N_spp x 3
-        o = torch.stack([x, y, -depth], -1)  # B x H x W x 3
         o = o.unsqueeze(-2).unsqueeze(-5)
         d = points - o  # B x 1 x H x W x N_spp x 3
 
@@ -121,8 +140,8 @@ class SequentialRayTracing(RenderingOptics):
         ray.to_(device=device)
         ray.norm_d_()
 
-        out_ray: BatchedRay = self.surface_list(ray)
-        out_ray.march_to_(self.surface_list.total_length)
+        out_ray: BatchedRay = self.surfaces(ray)
+        out_ray.march_to_(self.surfaces.total_length)
 
         x, y = out_ray.x / self.pixel_size[1], out_ray.y / self.pixel_size[0]
         x, y = x + self.pixel_num[1] / 2, y + self.pixel_num[0] / 2
@@ -159,9 +178,9 @@ class SequentialRayTracing(RenderingOptics):
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
 
         if self.sampling_mode == 'random':
-            x0, y0 = self.surface_list[0].sample_random(self.samples_per_point)
+            x0, y0 = self.surfaces[0].sample_random(self.samples_per_point)
         else:
-            x0, y0 = self.surface_list[0].sample(self.samples_per_point, self.sampling_mode)
+            x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
         points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1).to(o)  # N_spp x 3
         d = points - o  # N_spp x 3
 
@@ -169,16 +188,16 @@ class SequentialRayTracing(RenderingOptics):
         ray = BatchedRay(o, d, wl, self.coherent)  # N_wl x N_spp
         ray.norm_d_()
 
-        out_ray: BatchedRay = self.surface_list(ray)
-        out_ray.march_to_(self.surface_list.total_length)
+        out_ray: BatchedRay = self.surfaces(ray)
+        out_ray.march_to_(self.surfaces.total_length)
 
         # solve marching distance by least square
         t = -(out_ray.x * out_ray.d_x + out_ray.y * out_ray.d_y)
         t = t / (out_ray.d_x.square() + out_ray.d_y.square())
         new_z = out_ray.z + t * out_ray.d_z
         new_z = new_z[out_ray.valid & new_z.isnan().logical_not()].mean()
-        move = new_z - self.surface_list.total_length
-        self.surface_list[-1].distance += move
+        move = new_z - self.surfaces.total_length
+        self.surfaces[-1].distance += move
 
         return self
 

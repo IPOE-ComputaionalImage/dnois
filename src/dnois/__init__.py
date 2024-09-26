@@ -1,6 +1,7 @@
 from . import (
     fourier,
     mt,
+    optics,
     sensor,
     utils
 )

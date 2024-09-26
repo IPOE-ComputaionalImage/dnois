@@ -3,7 +3,7 @@ import warnings
 
 import torch
 
-from dnois.base.typing import Ts, Literal, Self
+from ...base.typing import Ts, Literal, Self
 
 __all__ = [
     'BatchedRay',
@@ -12,10 +12,12 @@ __all__ = [
 
 
 class NoValidRayError(RuntimeError):
+    """Error meaning that valid rays vanish."""
     pass
 
 
 # WARNING: do not modify the tensors in this class in an in-place manner
+# TODO: record phase change in coherent case; deal with floating-point error
 class BatchedRay:
     r"""
     A class representing a batch of rays, which means both the origin and direction is
@@ -24,9 +26,9 @@ class BatchedRay:
     and direction can be different but must be broadcastable.
     The broadcast shape without the last dimension is called *shape of rays*.
 
-    :param Ts origin: The origin of the rays. A tensor of shape ``(..., 3)``.
-    :param Ts direction: The direction of the rays. A tensor of shape ``(..., 3)``.
-    :param Ts wl: The wavelength of the rays. A tensor of shape ``(...)``.
+    :param Tensor origin: The origin of the rays. A tensor of shape ``(..., 3)``.
+    :param Tensor direction: The direction of the rays. A tensor of shape ``(..., 3)``.
+    :param Tensor wl: The wavelength of the rays. A tensor of shape ``(...)``.
     :param bool coherent: Whether the rays are coherent. Default: ``False``.
     """
 
@@ -34,6 +36,7 @@ class BatchedRay:
         '__weakref__',
         '_coherent',
         '_d_normed',
+        '_o_modified',
         '_ts',
     )
 
@@ -57,6 +60,7 @@ class BatchedRay:
             'v': torch.ones(_shape, dtype=torch.bool, device=origin.device),
         }
         self._d_normed = False
+        self._o_modified = False
         self._coherent = coherent  #: Whether this ray is coherent
 
         if coherent:
@@ -66,6 +70,15 @@ class BatchedRay:
         return f'BatchedRay(shape={self.shape}, coherent={self._coherent})'
 
     def clone(self, deep: bool = False) -> 'BatchedRay':
+        """
+        Return a copy of this object.
+
+        :param bool deep: Whether to clone associated tensors by calling
+            :py:meth:`torch.Tensor.clone`. If ``False``, returned object
+            will hold the reference to the tensors bound to this object.
+        :return: The cloned object.
+        :rtype: :py:class:`BatchedRay`
+        """
         new_ray = copy.copy(self)
         new_ray._ts = new_ray._ts.copy()
         if deep:
@@ -97,12 +110,12 @@ class BatchedRay:
                 ts = torch.broadcast_to(ts, (self.shape[0], 3))
             return ts[valid]
 
-        self._ts['o'] = _discard(self._ts['o'])  # N_valid x 3
-        self._ts['d'] = _discard(self._ts['d'])  # N_valid x 3
-        self._ts['wl'] = self._ts['wl'][valid]
-        self._ts['v'] = torch.ones(valid.size(0), device=valid.device, dtype=torch.bool)
+        self._ts['v'] = self._ts['v'][valid]
+        self.o = _discard(self._ts['o'])  # N_valid x 3
+        self.d = _discard(self._ts['d'])  # N_valid x 3
+        self.wl = self._ts['wl'][valid]  # N_valid
         if self._coherent:
-            self._ts['opl'] = self._ts['opl'][valid]  # N_valid
+            self.opl = self._ts['opl'][valid]  # N_valid
         return valid
 
     def flatten_(self) -> Self:
@@ -114,14 +127,12 @@ class BatchedRay:
         v = self._ts['v']
         o = torch.broadcast_to(self._ts['o'], v.shape + (3,))
         d = torch.broadcast_to(self._ts['d'], v.shape + (3,))
-        self._ts.update(
-            o=torch.flatten(o, 0, -2),
-            d=torch.flatten(d, 0, -2),
-            v=torch.flatten(v),
-            wl=torch.flatten(self._ts['wl'])
-        )
+        self._ts['v'] = torch.flatten(v)
+        self.o = torch.flatten(o, 0, -2)
+        self.d = torch.flatten(d, 0, -2)
+        self.wl = torch.flatten(self._ts['wl'])
         if self._coherent:
-            self._ts['opl'] = torch.flatten(self._ts['opl'])
+            self.opl = torch.flatten(self._ts['opl'])
         return self
 
     def copy_valid_(self) -> Self:
@@ -142,12 +153,12 @@ class BatchedRay:
         o, d = self._ts['o'].broadcast_to(v.shape + (3,)), self._ts['d'].broadcast_to(v.shape + (3,))
         wl = self._ts['wl']
         # TODO: fix when written tensor is expanded
-        self._ts['o'] = torch.where(v.unsqueeze(-1), o, o[*idx].clone())
-        self._ts['d'] = torch.where(v.unsqueeze(-1), d, d[*idx].clone())
-        self._ts['wl'] = torch.where(v, wl, wl[*idx].clone())
+        self.o = torch.where(v.unsqueeze(-1), o, o[*idx].clone())
+        self.d = torch.where(v.unsqueeze(-1), d, d[*idx].clone())
+        self.wl = torch.where(v, wl, wl[*idx].clone())
         if self._coherent:
             opl = self._ts['opl']
-            self._ts['opl'] = torch.where(v, opl, opl[*idx].clone())
+            self.opl = torch.where(v, opl, opl[*idx].clone())
         return self
 
     def march(self, t: Ts, n: float | Ts = None) -> 'BatchedRay':
@@ -156,9 +167,9 @@ class BatchedRay:
 
     def march_(self, t: Ts, n: float | Ts = None) -> Self:
         """
-        Propagate the rays forward by a distance ``t``. The origin will be updated.
+        March forward by a distance ``t``. The origin will be updated.
 
-        :param Ts t: Propagation distance. A tensor whose shape must be broadcastable
+        :param Tensor t: Propagation distance. A tensor whose shape must be broadcastable
             with the shape of rays.
         :param n: Refractive index of the medium in where the rays propagate.
             A float or a tensor with shape of rays. Default: 1.
@@ -167,27 +178,37 @@ class BatchedRay:
         """
         move = self.d_norm * t.unsqueeze(-1)
         new_o = self._ts['o'] + move
-        self._ts['o'] = new_o
-
-        if self._coherent:
-            if n is None:
-                warnings.warn('Refractive index not specified for coherent rays')
-            opl = t if n is None else n * t
-            self._ts['opl'] = self._ts['opl'] + opl.unsqueeze(-1)
 
         valid = self._ts['v']
         new_shape = torch.broadcast_shapes(new_o.shape[:-1], valid.shape)
         if new_shape != self.shape:
             self._ts['v'] = torch.broadcast_to(valid, new_shape)
-            self._ts['wl'] = torch.broadcast_to(self._ts['wl'], new_shape)
-            if self._coherent:
-                self._ts['opl'] = torch.broadcast_to(self._ts['opl'], new_shape)
+            self.wl = torch.broadcast_to(self._ts['wl'], new_shape)
+
+        self.o = new_o
+        if self._coherent:
+            if n is None:
+                warnings.warn('Refractive index not specified for coherent rays')
+            opl = t if n is None else n * t
+            self.opl = self._ts['opl'] + opl
         return self
 
     def march_to(self, z: Ts, n: float | Ts = None) -> 'BatchedRay':
+        """Out-of-place version of :py:meth:`.march_to_`."""
         return self.clone().march_to_(z, n)
 
     def march_to_(self, z: Ts, n: float | Ts = None) -> Self:
+        """
+        March forward to a given z value ``z``. This is similar to :py:meth:`.march_`,
+        but all the rays end up with identical z coordinate rather than marching distance.
+
+        :param Tensor z: Target value of z coordinate.
+            A tensor whose shape must be broadcastable with the shape of rays.
+        :param n: Refractive index of the medium in where the rays propagate.
+            A float or a tensor with shape of rays. Default: 1.
+        :type n: float or Tensor
+        :return: self
+        """
         t = (z - self.z) / self.d_z
         return self.march_(t, n)
 
@@ -230,17 +251,12 @@ class BatchedRay:
 
         :param Tensor valid: A tensor with same shape as that of rays.
         :param str action: The action to take after updating validity flags.
-            Call :py:meth:`.discard_` if ``'discard'``, or :py:meth:`.keep_valid_`
+            Call :py:meth:`.discard_` if ``'discard'``, or :py:meth:`.copy_valid_`
             if ``'copy'``, or nothing if ``None``. Default: ``None``.
         :return: self
         """
         if valid.dtype != torch.bool:
             raise TypeError('Only bool tensors are supported.')
-        # if valid.shape != self.shape:
-        #     raise ValueError(
-        #         f'The shape of new validity tensor must be same as the old, '
-        #         f'got {valid.shape}'
-        #     )
         self._ts['v'] = torch.logical_and(self._ts['v'], valid)
         if action == 'discard':
             self.discard_()
@@ -271,6 +287,7 @@ class BatchedRay:
     def o(self, value: Ts):
         self._check_shape(value)
         self._ts['o'] = value
+        self._o_modified = True
 
     @property
     def d(self) -> Ts:
@@ -340,7 +357,7 @@ class BatchedRay:
         """
         The accumulative optical path length of the rays in meters if coherent,
         whose shape is the shape of rays.
-        If :py:attr:`.coherent` is ``False``, this property is ``None``.
+        This property is ``None`` if the object is set to incoherent.
 
         :type: Tensor
         """
@@ -381,6 +398,20 @@ class BatchedRay:
         :type: Tensor
         """
         return self._ts['o'][..., 2]
+
+    @property
+    def r2(self) -> Ts:
+        """
+        :math:`x^2+y^2` of the origin. Its shape is that of ``self.o``
+        without the last dimension.
+
+        :type: Tensor
+        """
+        if not self._o_modified and 'r2' in self._ts:
+            return self._ts['r2']
+        r2 = self.x.square() + self.y.square()
+        self._ts['r2'] = r2
+        return r2
 
     @property
     def d_x(self) -> Ts:

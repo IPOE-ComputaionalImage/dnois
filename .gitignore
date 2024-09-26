@@ -7,4 +7,4 @@ docs/_build/
 src/dnois.egg-info/
 
 # sphinx autosummary stub
-docs/content/ref/_stub/
+docs/content/generated

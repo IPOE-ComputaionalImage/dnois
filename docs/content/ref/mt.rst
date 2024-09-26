@@ -14,11 +14,12 @@ Base class
 Materials
 ****************************
 .. autosummary::
-    :toctree: _stub/mt
+    :toctree: ../generated/mt
     :template: autosummary/mt_class.rst
 
     Cauchy
     Conrady
+    Constant
     Herzberger
     Schott
     Sellmeier1
@@ -26,3 +27,30 @@ Materials
     Sellmeier3
     Sellmeier4
     Sellmeier5
+
+*******************************
+Built-in materials
+*******************************
+
+Built-in materials can be accessed without instantiation or calling :py:func:`get`.
+
+.. autoattribute:: dnois.mt.vacuum
+
+.. _accessing_materials:
+
+*****************************
+Accessing materials
+*****************************
+.. autosummary::
+    :toctree: ../generated/mt
+
+    get
+    is_available
+    list_all
+    register
+    remove
+
+*****************************
+Others
+*****************************
+.. autofunction:: dnois.mt.refractive_index

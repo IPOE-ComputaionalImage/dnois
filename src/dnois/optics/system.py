@@ -5,9 +5,9 @@ import warnings
 import torch
 from torch import nn
 
-from dnois.base import FRAUNHOFER_LINES, ShapeError
-import dnois.scene as _sc
-from dnois.base.typing import (
+from .. import scene as _sc
+from ..base import FRAUNHOFER_LINES, ShapeError
+from ..base.typing import (
     Ts, Size2d, FovSeg, Vector, SclOrVec, Callable,
     size2d, vector, cast, scl_or_vec
 )
@@ -29,6 +29,9 @@ class Optics(nn.Module, metaclass=abc.ABCMeta):
 
 
 class StandardOptics(Optics, metaclass=abc.ABCMeta):
+    """
+    TODO
+    """
     def __init__(
         self,
         pixel_num: Size2d,
@@ -55,14 +58,66 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
     @property
     @abc.abstractmethod
     def reference(self) -> 'Pinhole':
+        """
+        Returns the reference model of this object.
+
+        :type: Pinhole
+        """
         pass
 
     @property
     def sensor_size(self) -> tuple[float, float]:
+        """
+        Returns the physical size i.e. height and width of the sensor.
+
+        :type: tuple[float, float]
+        """
         return self.pixel_size[0] * self.pixel_num[0], self.pixel_size[1] * self.pixel_num[1]
 
 
 class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
+    """
+    TODO
+
+    :param pixel_num: Number of pixels in vertical and horizontal directions or the sensor.
+    :type pixel_num: int or tuple[int, int]
+    :param pixel_size: Physical size of a pixel in vertical and horizontal directions.
+    :type pixel_size: float or tuple[float, float]
+    :param float nominal_focal_length: Nominal focal length. Default: omitted.
+    :param wavelength: Wavelengths considered. Default: omitted.
+    :type wavelength: float, Sequence[float, float] or 1D Tensor
+    :param fov_segments: Number of field-of-views when rendering images. Default: ``paraxial``.
+
+        ``int`` or ``tuple[int, int]``
+            The numbers in vertical and horizontal directions.
+
+        ``paraxial``
+            Only paraxial points are considered.
+
+        ``pointwise``
+            The optical responses of every individual object points will be computed.
+    :type fov_segments: int, tuple[int, int] or str
+    :param depth: Depth adopted for rendering images when the scene to be imaged
+        carries no depth information or ``depth_aware`` is ``False``. Default: omitted.
+
+        ``float`` or 0D tensor
+            The value will always be used as depth.
+
+        ``Sequence[float]`` or 1D tensor
+            Randomly select a value from given value for each image.
+
+        A 2-``tuple`` of 0D tensors
+            They are interpreted as minimum and maximum values
+            for random sampling (see :py:meth:`~sample_depth`).
+    :type depth: float, Sequence[float], Tensor or tuple[Tensor, Tensor]
+    :param bool depth_aware: Whether this model supports depth-aware rendering.
+        If not, scenes to be images are assumed to lie within a plane
+        with single depth even with depth information given. Default: ``False``.
+    :param bool polarized: Whether this model supports polarized scenes.
+        If not, all the polarized channels of a polarized scene will be treated identically.
+        Default: ``False``.
+    :param bool coherent: Whether this model renders images coherently. Default: ``False``.
+    """
     optical_infinity: float = 1e3  #: Optical "infinite" depth.
 
     def __init__(
