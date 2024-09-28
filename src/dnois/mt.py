@@ -17,7 +17,8 @@ import abc
 
 import torch
 
-from dnois.base.typing import Numeric, Union, cast
+from .base import convert
+from .base.typing import Numeric, Union, cast
 
 __all__ = [
     'vacuum',
@@ -43,30 +44,6 @@ __all__ = [
 ]
 
 _PRINT_PRECISION = 3
-
-_units = {
-    'm': 1,
-    'dm': 1e-1,
-    'cm': 1e-2,
-    'mm': 1e-3,
-    'um': 1e-6,
-    'nm': 1e-9,
-    'pm': 1e-12,
-    'A': 1e-10
-}
-
-
-def _scale(name: str) -> float:
-    v = _units.get(name, None)
-    if v is None:
-        raise ValueError(f'Unknown unit: {name}')
-    return v
-
-
-def _convert(value: Numeric, from_: str, to: str) -> Numeric:
-    ratio = _scale(from_) / _scale(to)
-    value = value * ratio
-    return value
 
 
 def _format_flist(flist: list[float], precision: int) -> str:
@@ -120,7 +97,7 @@ class Material(metaclass=abc.ABCMeta):
         # convert wl in unit to wl in default unit if unit is given,
         # or wl is assumed to be with default unit
         if unit is not None and unit != self.default_unit:
-            wl = _convert(wl, unit, self.default_unit)
+            wl = convert(wl, unit, self.default_unit)
 
         m1, m2 = (wl.min().item(), wl.max().item()) if torch.is_tensor(wl) else (wl, wl)
         if m1 < self.min_wl * (1 - 1e-6) or m2 > self.max_wl * (1 + 1e-6):

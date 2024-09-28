@@ -47,6 +47,7 @@ class SequentialRayTracing(RenderingOptics):
         ``circular``
             Rays are sampled on evenly spaced circular grid.
     """
+
     def __init__(
         self,
         surfaces: SurfaceList,
@@ -90,7 +91,13 @@ class SequentialRayTracing(RenderingOptics):
     ) -> Ts:
         raise NotImplementedError()
 
-    def pointwise_render(self, scene: _sc.ImageScene, vignette: bool = True) -> Ts:
+    def pointwise_render(
+        self,
+        scene: _sc.ImageScene,
+        vignette: bool = True,
+        samples_per_point: int | tuple[int, int] = None,
+        sampling_mode: SurfSample = None,
+    ) -> Ts:
         self._check_scene(scene)
         if self.polarized or scene.n_plr != 0:
             raise NotImplementedError()
@@ -101,6 +108,8 @@ class SequentialRayTracing(RenderingOptics):
                              f'got {scene.n_wl}')
         if len(self.surfaces) == 0:
             raise RuntimeError(f'No surface available')
+        sampling_mode = sampling_mode or self.sampling_mode
+        samples_per_point = samples_per_point or self.samples_per_point
 
         scene = scene.batch()
         device = self.device
@@ -126,10 +135,7 @@ class SequentialRayTracing(RenderingOptics):
         o = torch.stack([x, y, -depth], -1)  # B x H x W x 3
         # TODO: currently depth=0 plane is assumed to be z=0 plane, which is incorrect
 
-        if self.sampling_mode == 'random':
-            x0, y0 = self.surfaces[0].sample_random(self.samples_per_point, device=device)
-        else:
-            x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode, device=device)
+        x0, y0 = self.surfaces[0].sample(samples_per_point, sampling_mode)
         spp = x0.numel()
         points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1)  # N_spp x 3
         o = o.unsqueeze(-2).unsqueeze(-5)
@@ -177,10 +183,7 @@ class SequentialRayTracing(RenderingOptics):
         z = z.clamp(-self.optical_infinity, 0)
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
 
-        if self.sampling_mode == 'random':
-            x0, y0 = self.surfaces[0].sample_random(self.samples_per_point)
-        else:
-            x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
+        x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
         points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1).to(o)  # N_spp x 3
         d = points - o  # N_spp x 3
 

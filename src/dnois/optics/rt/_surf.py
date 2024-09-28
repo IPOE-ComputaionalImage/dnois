@@ -5,8 +5,11 @@ import torch
 from torch import nn
 
 from .ray import BatchedRay
-from ... import mt
-from ...base.typing import Sequence, Ts, Any, Callable, Literal, Scalar, scalar
+from ... import mt, base
+from ...base.typing import (
+    Sequence, Ts, Any, Callable, Literal, Scalar, Self, Size2d, SurfSample,
+    scalar, overload, size2d,
+)
 
 __all__ = [
     'NT_EPSILON',
@@ -27,7 +30,8 @@ NT_THRESHOLD_STRICT: float = 20e-9
 NT_UPDATE_BOUND: float = 5.
 NT_EPSILON: float = 1e-9
 
-SAMPLE_LIMIT: float = 0.98
+SAMPLE_LIMIT: float = 1 - 1e-4
+EDGE_CUTTING: float = 1 - 1e-5
 
 
 class Context:
@@ -38,12 +42,12 @@ class Context:
     Every surface contained in a lens group has a related context object.
     If it is not contained in any group, its context attribute is ``None``.
 
-    :param Surface surface: The host surface that this context belongs to.
+    :param CircularSurface surface: The host surface that this context belongs to.
     :param SurfaceList lens_group: The lens group containing the surface.
     """
 
-    def __init__(self, surface: 'Surface', lens_group: 'SurfaceList'):
-        self.surface: 'Surface' = surface  #: The host surface that this context belongs to.
+    def __init__(self, surface: 'CircularSurface', lens_group: 'SurfaceList'):
+        self.surface: 'CircularSurface' = surface  #: The host surface that this context belongs to.
         self.lens_group: 'SurfaceList' = lens_group  #: The lens group containing the surface.
 
     @property
@@ -90,7 +94,7 @@ class Context:
             'This may be because the surface has been removed from the lens group.')
 
 
-class Surface(nn.Module, metaclass=abc.ABCMeta):
+class Surface(nn.Module, base.TensorContainerMixIn, metaclass=abc.ABCMeta):
     r"""
     Base class for optical surfaces in a group of lens.
     The position of a surface in a lens group is specified by a single z-coordinate,
@@ -125,6 +129,7 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
     :param dict newton_config: Configuration for Newton's method.
         See :ref:`configuration_for_newtons_method` for details.
     """
+    _delegate_name = 'distance'
 
     def __init__(
         self,
@@ -211,8 +216,16 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         """
         pass
 
-    @abc.abstractmethod
+    @overload
+    def _valid(self, x: Ts, y: Ts) -> Ts:
+        pass
+
+    @overload
     def _valid(self, ray: BatchedRay) -> Ts:
+        pass
+
+    @abc.abstractmethod
+    def _valid(self, *args, **kwargs) -> Ts:
         """
         Checks whether given rays whose origins are on the surface are valid.
 
@@ -343,15 +356,6 @@ class Surface(nn.Module, metaclass=abc.ABCMeta):
         ray.update_valid_(nt2.squeeze(-1) > 0, 'copy').norm_d_()
         return ray
 
-    @property
-    def device(self) -> torch.device:
-        """
-        Device of this object.
-
-        :type: torch.device
-        """
-        return self.distance.device
-
     def _f(self, ray: BatchedRay) -> Ts:
         return self.h_extended(ray.x, ray.y) + self.context.z - ray.z
 
@@ -466,50 +470,77 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         lim2 = self.geo_radius.square()
         return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2))
 
-    def sample(
-        self, n: tuple[int, int],
-        mode: Literal['rectangular', 'circular'],
-        sampling_curve: Callable[[Ts], Ts] = None,
-        **kwargs
-    ) -> tuple[Ts, Ts]:
-        """
-        Sample points on the baseline plane in a regular grid.
-        This method is subject to change.
-        """
-        if mode == 'circular':
-            t = torch.arange(n[0], **kwargs).unsqueeze(0) / n[0] * (2 * torch.pi)
-            r = torch.linspace(1 / n[1], SAMPLE_LIMIT, n[1], **kwargs).unsqueeze(1)
-            if sampling_curve is not None:
-                r = sampling_curve(r)
-            r = r * self.radius
-            return torch.flatten(r * t.cos()), torch.flatten(r * t.sin())
-        elif mode == 'rectangular':  # TODO: this seems meaningless
-            xy = [torch.linspace(-SAMPLE_LIMIT, SAMPLE_LIMIT, _n, **kwargs) for _n in n]
-            if sampling_curve is not None:
-                xy = [sampling_curve(x_or_y[_n // 2:]) for x_or_y, _n in zip(xy, n)]
-                xy = [torch.cat((-x_or_y.flip([0])[:_n // 2], x_or_y)) for x_or_y, _n in zip(xy, n)]
-            x, y = torch.meshgrid(*xy, indexing='xy')
-            return x.flatten() * self.radius, y.flatten() * self.radius
-        else:
-            raise ValueError(f'Unknown mode: {mode}')
+    def sample_rectangular(self, n: Size2d, sampling_curve: Callable[[Ts], Ts]) -> tuple[Ts, Ts]:
+        n = size2d(n)
+        xy = [torch.linspace(
+            -SAMPLE_LIMIT, SAMPLE_LIMIT, _n, device=self.device, dtype=self.dtype
+        ) for _n in n]
+        if sampling_curve is not None:
+            xy = [sampling_curve(x_or_y[_n // 2:]) for x_or_y, _n in zip(xy, n)]
+            xy = [torch.cat((-x_or_y.flip([0])[:_n // 2], x_or_y)) for x_or_y, _n in zip(xy, n)]
+        x, y = torch.meshgrid(*xy, indexing='xy')  # both 2D
+        x, y = x.flatten() * self.radius, y.flatten() * self.radius
+        mask = self._valid(x, y)
+        return x[mask], y[mask]
 
-    def sample_random(self, n: int, sampling_curve: Callable[[Ts], Ts] = None, **kwargs) -> tuple[Ts, Ts]:
+    def sample_unipolar(self, n: Size2d) -> tuple[Ts, Ts]:
+        n = size2d(n)
+        zero = torch.tensor(0., dtype=self.dtype, device=self.device)
+        r = torch.linspace(0, self.radius * EDGE_CUTTING, n[0] + 1, device=self.device, dtype=self.dtype)
+        r = [r[i].expand(i * n[1]) for i in range(1, n[0] + 1)]  # n[1]*n[0]*(n[0]+1)/2
+        r = torch.cat([zero] + r)  # n[1]*n[0]*(n[0]+1)/2+1
+        t = [
+            torch.arange(i * n[1], device=self.device, dtype=self.dtype) / (n[1] * i) * (2 * torch.pi)
+            for i in range(1, n[0] + 1)
+        ]
+        t = torch.cat([zero] + t)
+        return r * t.cos(), r * t.sin()
+
+    def sample_random(self, n: int, sampling_curve: Callable[[Ts], Ts] = None) -> tuple[Ts, Ts]:
         """
         Sample points on the baseline plane randomly.
         This method is subject to change.
         """
-        t = torch.rand(n, **kwargs) * (2 * torch.pi)
-        r = torch.rand(n, **kwargs)
+        t = torch.rand(n, device=self.device, dtype=self.dtype) * (2 * torch.pi)
+        r = torch.rand(n, device=self.device, dtype=self.dtype)
         if sampling_curve is not None:
             r = sampling_curve(r)
         r = r * self.radius
         return r * t.cos(), r * t.sin()
 
-    def _valid(self, ray: BatchedRay) -> Ts:
-        return ray.r2 <= self.radius ** 2
+    def sample(self, n: Size2d, mode: SurfSample, **kwargs) -> tuple[Ts, Ts]:
+        """
+        Sample points on the baseline plane in a regular grid.
+        This method is subject to change.
+        """
+        if mode == 'unipolar':
+            return self.sample_unipolar(n)
+        elif mode == 'rectangular':
+            return self.sample_rectangular(n, **kwargs)
+        elif mode == 'random':
+            return self.sample_random(n, **kwargs)
+        else:
+            raise ValueError(f'Unknown sampling mode: {mode}')
 
     def _f(self, ray: BatchedRay) -> Ts:
         return self.h_extended_r2(ray.r2) + self.context.z - ray.z
+
+    @overload
+    def _valid(self, x: Ts, y: Ts) -> Ts:
+        pass
+
+    @overload
+    def _valid(self, ray: BatchedRay) -> Ts:
+        pass
+
+    def _valid(self, *args, **kwargs) -> Ts:
+        ba = base.get_bound_args(self._valid, *args, **kwargs)
+        if 'ray' in ba.arguments:  # _valid(self, ray: BatchedRay) -> Ts
+            ray: BatchedRay = ba.arguments['ray']
+            return ray.x.square() + ray.y.square() <= self.radius ** 2
+        else:  # _valid(self, x: Ts, y: Ts) -> Ts
+            x, y = ba.arguments['x'], ba.arguments['y']
+            return x.square() + y.square() <= self.radius ** 2
 
     def _f_grad(self, ray: BatchedRay) -> Ts:
         phpx, phpy = self.h_grad_extended(ray.x, ray.y, ray.r2)
@@ -522,7 +553,22 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         return descent
 
 
-class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
+class CircularStop(CircularSurface):
+    def intercept(self, ray: BatchedRay) -> BatchedRay:
+        raise NotImplementedError()
+
+    def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
+        return torch.zeros_like(x), torch.zeros_like(y)
+
+    def h_r2(self, r2: Ts) -> Ts:
+        return torch.zeros_like(r2)
+
+    @property
+    def geo_radius(self) -> Ts:
+        return torch.tensor(self.radius, device=self.device, dtype=self.dtype)
+
+
+class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.MutableSequence[CircularSurface]):
     """
     A sequential container of surfaces. This class is derived from
     :py:class:`torch.nn.ModuleList` and implements
@@ -531,7 +577,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
     and a list of :py:class:`Surface`.
 
     :param surfaces: A sequence of :py:class:`Surface` objects. Default: ``[]``.
-    :type surfaces: Sequence[Surface]
+    :type surfaces: Sequence[CircularSurface]
     :param env_material: The material before the first surface.
     :type env_material: :py:class:`~dnois.mt.Material`
     """
@@ -539,7 +585,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
 
     def __init__(
         self,
-        surfaces: Sequence[Surface] = None,
+        surfaces: Sequence[CircularSurface] = None,
         env_material: mt.Material | str = 'vacuum',
     ):
         super().__init__()
@@ -550,30 +596,31 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
 
         # This is needed to facilitate MutableSequence operations
         # because torch.nn.ModuleList saves submodules like a dict rather than list
-        self._slist: list[Surface] = []
+        self._slist: list[CircularSurface] = []
+        self._stop_idx = None
         #: Material before the first surface.
         self.env_material: mt.Material = env_material
 
         self.extend(surfaces)
 
-    def __contains__(self, item):
+    def __contains__(self, item) -> bool:
         """:meta private:"""
         return self._slist.__contains__(item)
 
     def __delitem__(self, key):
         """:meta private:"""
+        super().__delitem__(key)
         self._slist.__getitem__(key).context = None
         self._slist.__delitem__(key)
-        super().__delitem__(key)
 
     def __getitem__(self, item):
         """:meta private:"""
         return self._slist.__getitem__(item)
 
-    def __iadd__(self, other):
+    def __iadd__(self, other: Sequence[CircularSurface]) -> Self:
         """:meta private:"""
-        self._slist.__iadd__(other)
-        return super().__iadd__(other)
+        self.extend(other)
+        return self
 
     def __iter__(self):
         """:meta private:"""
@@ -583,21 +630,21 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         """:meta private:"""
         return self._slist.__len__()
 
-    def __reversed__(self):
+    def __reversed__(self) -> 'SurfaceList':
         """:meta private:"""
-        return self._slist.__reversed__()
+        return SurfaceList(list(self._slist.__reversed__()), self.env_material)
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: int, value: CircularSurface):
         """:meta private:"""
         self._welcome(value)
-        self._slist.__setitem__(key, value)
         super().__setitem__(key, value)
+        self._slist.__setitem__(key, value)
 
-    def __add__(self, other: 'SurfaceList'):
+    def __add__(self, other: Sequence[CircularSurface]) -> 'SurfaceList':
         """:meta private:"""
-        return SurfaceList(self._slist + other._slist, self.env_material)
+        return SurfaceList(self._slist + list(other), self.env_material)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """:meta private:"""
         _repr = super().__repr__()[:-1]  # remove that last parentheses
         _repr += f'  env_material={repr(self.env_material)}\n)'
@@ -607,10 +654,9 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         """:meta private:"""
         return super().__dir__() + ['env_material']
 
-    def append(self, surface: Surface):
+    def append(self, surface: CircularSurface):
         """:meta private:"""
         self._welcome(surface)
-        self._slist.append(surface)
         super().append(surface)
 
     def clear(self):
@@ -620,56 +666,51 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         self._slist.clear()
         self._super_clear()
 
-    def count(self, value) -> int:
+    def count(self, value: CircularSurface) -> int:
         """:meta private:"""
         return self._slist.count(value)
 
-    def extend(self, surfaces: Sequence[Surface]):
+    def extend(self, surfaces: Sequence[CircularSurface]):
         """:meta private:"""
         self._welcome(*surfaces)
-        self._slist.extend(surfaces)
         super().extend(surfaces)
 
-    def index(self, value, start: int = 0, stop: int = ...) -> int:
+    def index(self, value: CircularSurface, start: int = 0, stop: int = ...) -> int:
         """:meta private:"""
         if stop is ...:
             return self._slist.index(value, start)
         else:
             return self._slist.index(value, start, stop)
 
-    def insert(self, index: int, surface: Surface):
+    def insert(self, index: int, surface: CircularSurface):
         """:meta private:"""
         self._welcome(surface)
-        self._slist.insert(index, surface)
         super().insert(index, surface)
+        self._slist.insert(index, surface)
 
-    def pop(self, index=-1) -> Surface:
+    def pop(self, index: int = -1) -> CircularSurface:
         """:meta private:"""
-        super().pop(index)
-        s = self._slist.pop(index)
+        s = super().pop(index)
         s.context = None
         return s
 
-    def remove(self, value):
+    def remove(self, value: CircularSurface):
         """:meta private:"""
         idx = self.index(value)
         self.pop(idx)
 
     def reverse(self):
         """:meta private:"""
-        for idx in range(len(self)):
-            super().pop()
-        self._slist.reverse()
+        ss = self._slist.copy()
+        self._slist.clear()
         self._super_clear()
-        super().extend(self._slist)
+        self.extend(ss)
 
     def add_module(self, name: str, module: nn.Module):
         """:meta private:"""
-        if name.isdigit() and isinstance(module, Surface):
-            idx = self._get_abs_string_index(name)
-            self.insert(idx, module)
-        else:
-            super().add_module(name, module)
+        if name.isdigit() and isinstance(module, CircularSurface):
+            self._slist.insert(int(name), module)
+        super().add_module(name, module)
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
         """
@@ -691,7 +732,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         return ray
 
     @property
-    def surfaces(self) -> list[Surface]:
+    def surfaces(self) -> list[CircularSurface]:
         """
         Returns a list of contained surfaces.
 
@@ -723,12 +764,33 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
             return None
         return sum(s.distance for s in self._slist)
 
-    def _welcome(self, *new: Surface):
+    @property
+    def stop_idx(self) -> int:
+        """
+        Index of the aperture stop. Returns ``None`` if no stop is found.
+
+        :type: int
+        """
+        return self._stop_idx
+
+    @property
+    def stop(self) -> CircularSurface:
+        """
+        The aperture stop object. Returns ``None`` if no stop is found.
+        Note that it need not return an instance of :py:class:`CircularStop`.
+
+        :type: :py:class:`CircularStop`
+        """
+        idx = self._stop_idx
+        return None if idx is None else self._slist[idx]
+
+    def _welcome(self, *new: CircularSurface):
         for surface in new:
-            if self._force_surface and not isinstance(surface, Surface):
-                raise TypeError(f'An instance of Surface expected, got {type(surface)}')
+            if self._force_surface and not isinstance(surface, CircularSurface):
+                msg = f'An instance of {CircularSurface.__name__} expected, got {type(surface)}'
+                raise TypeError(msg)
             if surface.context is not None:
-                raise RuntimeError(f'A surface already contained in a lens group'
+                raise RuntimeError(f'A surface already contained in a lens group '
                                    f'cannot be inserted to another one')
             surface.context = Context(surface, self)
 

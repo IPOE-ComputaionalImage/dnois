@@ -6,9 +6,9 @@ import torch
 from torch import nn
 
 from .. import scene as _sc
-from ..base import FRAUNHOFER_LINES, ShapeError
+from ..base import FRAUNHOFER_LINES, ShapeError, TensorContainerMixIn
 from ..base.typing import (
-    Ts, Size2d, FovSeg, Vector, SclOrVec, Callable,
+    Ts, Size2d, FovSeg, Vector, SclOrVec, Callable, Any,
     size2d, vector, cast, scl_or_vec
 )
 
@@ -32,6 +32,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
     """
     TODO
     """
+
     def __init__(
         self,
         pixel_num: Size2d,
@@ -75,7 +76,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         return self.pixel_size[0] * self.pixel_num[0], self.pixel_size[1] * self.pixel_num[1]
 
 
-class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
+class RenderingOptics(StandardOptics, TensorContainerMixIn, metaclass=abc.ABCMeta):
     """
     TODO
 
@@ -118,6 +119,7 @@ class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
         Default: ``False``.
     :param bool coherent: Whether this model renders images coherently. Default: ``False``.
     """
+    _delegate_name = 'wavelength'
     optical_infinity: float = 1e3  #: Optical "infinite" depth.
 
     def __init__(
@@ -171,25 +173,25 @@ class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
     ) -> Ts:  # X x Y x D x P x C x H x W
         pass
 
-    def forward(self, scene: _sc.Scene) -> Ts:
+    def forward(self, scene: _sc.Scene, **kwargs) -> Ts:
         self._check_scene(scene)
         scene: _sc.ImageScene
         if self.fov_segments == 'paraxial':
-            return self.conv_render(scene)
+            return self.conv_render(scene, **kwargs)
         elif self.fov_segments == 'pointwise':
-            return self.pointwise_render(scene)
-        else:
-            return self.patchwise_render(scene, cast(tuple[int, int], self.fov_segments))
+            return self.pointwise_render(scene, **kwargs)
+        else:  # tuple[int, int]
+            return self.patchwise_render(scene, cast(tuple[int, int], self.fov_segments), **kwargs)
 
-    def pointwise_render(self, scene: _sc.ImageScene) -> Ts:
+    def pointwise_render(self, scene: _sc.ImageScene, **kwargs) -> Ts:
         self._check_scene(scene)
         raise NotImplementedError()
 
-    def patchwise_render(self, scene: _sc.ImageScene, segments: tuple[int, int]) -> Ts:
+    def patchwise_render(self, scene: _sc.ImageScene, segments: tuple[int, int], **kwargs) -> Ts:
         self._check_scene(scene)
         raise NotImplementedError()
 
-    def conv_render(self, scene: _sc.ImageScene) -> Ts:
+    def conv_render(self, scene: _sc.ImageScene, **kwargs) -> Ts:
         self._check_scene(scene)
         kwargs = {}
         warning_str = (f'Trying to render a {{0}} image by an instance of '
@@ -230,10 +232,6 @@ class RenderingOptics(StandardOptics, metaclass=abc.ABCMeta):
                     raise ShapeError(f'probabilities must be a 1D tensor')
                 idx = torch.multinomial(probabilities, 1).squeeze().item()
             return depth[idx]
-
-    @property
-    def device(self) -> torch.device:
-        return self.wavelength.device
 
     def _check_scene(self, scene: _sc.Scene):
         if not isinstance(scene, _sc.ImageScene):

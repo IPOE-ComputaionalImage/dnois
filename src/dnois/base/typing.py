@@ -58,7 +58,7 @@ Size2d = Union[int, tuple[int, int]]
 # options
 FovSeg = Literal['paraxial', 'pointwise']
 ConvOut = Literal['full', 'same', 'valid']
-SurfSample = Literal['circular', 'rectangular', 'random']
+SurfSample = Literal['unipolar', 'rectangular', 'random']
 RGBFormat = Literal['floats', 'ints', 'hex']
 
 

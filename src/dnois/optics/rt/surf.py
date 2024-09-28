@@ -16,7 +16,7 @@ __all__ = [
 ]
 __all__ += _surf.__all__
 
-EDGE_CUTTING: float = 1 - 1e-6
+EDGE_CUTTING: float = 1 - 1e-5
 
 
 def _spherical(r2: Ts, c: Ts, k: Ts = None) -> Ts:
@@ -197,5 +197,5 @@ class EvenAspherical(Conic):
         return self.coefficients.size(0)
 
 
-def build_surface(surface_config: dict[str, Any]) -> Surface:
+def build_surface(surface_config: dict[str, Any]) -> CircularSurface:
     raise NotImplementedError()
