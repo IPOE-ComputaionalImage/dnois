@@ -7,7 +7,7 @@ from torch import nn
 from .ray import BatchedRay
 from ... import mt, base
 from ...base.typing import (
-    Sequence, Ts, Any, Callable, Literal, Scalar, Self, Size2d, SurfSample,
+    Sequence, Ts, Any, Callable, Scalar, Self, Size2d, SurfSample,
     scalar, overload, size2d,
 )
 

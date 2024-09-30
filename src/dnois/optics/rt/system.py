@@ -78,7 +78,7 @@ class SequentialRayTracing(RenderingOptics):
         #: A single int for random sample, or a pair of int representing
         #: the numbers along two directions.
         self.samples_per_point: int | tuple[int, int] = samples_per_point
-        #: Mode for sampling on a surface, either ``rectangular``, ``circular`` or ``random``.
+        #: Mode for sampling on a surface, either ``rectangular``, ``unipolar`` or ``random``.
         self.sampling_mode: SurfSample = sampling_mode
 
     def psf(
@@ -142,7 +142,7 @@ class SequentialRayTracing(RenderingOptics):
         d = points - o  # B x 1 x H x W x N_spp x 3
 
         wl = self.wavelength.view(1, -1, 1, 1, 1)
-        ray = BatchedRay(o, d, wl, self.coherent)  # B x N_wl x H x W x N_spp
+        ray = BatchedRay(o, d, wl)  # B x N_wl x H x W x N_spp
         ray.to_(device=device)
         ray.norm_d_()
 
@@ -188,7 +188,7 @@ class SequentialRayTracing(RenderingOptics):
         d = points - o  # N_spp x 3
 
         wl = self.wavelength.reshape(-1, 1)
-        ray = BatchedRay(o, d, wl, self.coherent)  # N_wl x N_spp
+        ray = BatchedRay(o, d, wl)  # N_wl x N_spp
         ray.norm_d_()
 
         out_ray: BatchedRay = self.surfaces(ray)
