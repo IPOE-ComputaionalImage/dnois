@@ -1,12 +1,17 @@
-from ..base.typing import RGBFormat, cast
+from ..base.typing import RGBFormat, Ts, cast
 
 __all__ = [
+    't4plot',
     'wl2rgb',
 
     'RGBTriplet',
 ]
 
 RGBTriplet = tuple[float, float, float] | str
+
+
+def t4plot(tensor: Ts) -> Ts:
+    return tensor.detach().cpu()
 
 
 def wl2rgb(wl: float, gamma: float = 0.8, output_format: RGBFormat = 'floats') -> RGBTriplet:

@@ -112,7 +112,7 @@ class BatchedRay(base.TensorContainerMixIn):
         init_opl = _2tensor(init_opl, device, dtype)
         init_phase = _2tensor(init_phase, device, dtype)
         _check_shape_compatible(origin[..., 0], direction[..., 0], wl, init_opl, init_phase)
-        self._ts = {
+        self._ts: dict[str, Ts] = {
             'o': origin,
             'd': direction,
             'wl': wl,
@@ -129,6 +129,17 @@ class BatchedRay(base.TensorContainerMixIn):
     def __repr__(self):
         shape, recording_opl, recording_phase = self.shape, self.recording_opl, self.recording_phase
         return f'BatchedRay({shape=}, {recording_opl=}, {recording_phase=})'
+
+    def broadcast_(self) -> Self:
+        """
+        Broadcast all the associated tensors to shape of rays :py:attr:`.shape`.
+
+        :return: self
+        """
+        shape = self.shape
+        for k in list(self._ts.keys()):
+            self._ts[k] = torch.broadcast_to(self._ts[k], (shape + (3,)) if k in ('o', 'd') else shape)
+        return self
 
     def clone(self, deep: bool = False) -> 'BatchedRay':
         """

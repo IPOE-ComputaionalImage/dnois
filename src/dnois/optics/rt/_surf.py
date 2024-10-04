@@ -42,12 +42,12 @@ class Context:
     Every surface contained in a lens group has a related context object.
     If it is not contained in any group, its context attribute is ``None``.
 
-    :param CircularSurface surface: The host surface that this context belongs to.
+    :param Surface surface: The host surface that this context belongs to.
     :param SurfaceList lens_group: The lens group containing the surface.
     """
 
-    def __init__(self, surface: 'CircularSurface', lens_group: 'SurfaceList'):
-        self.surface: 'CircularSurface' = surface  #: The host surface that this context belongs to.
+    def __init__(self, surface: 'Surface', lens_group: 'SurfaceList'):
+        self.surface: 'Surface' = surface  #: The host surface that this context belongs to.
         self.lens_group: 'SurfaceList' = lens_group  #: The lens group containing the surface.
 
     @property
@@ -568,7 +568,7 @@ class CircularStop(CircularSurface):
         return torch.tensor(self.radius, device=self.device, dtype=self.dtype)
 
 
-class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.MutableSequence[CircularSurface]):
+class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.MutableSequence):
     """
     A sequential container of surfaces. This class is derived from
     :py:class:`torch.nn.ModuleList` and implements
@@ -577,7 +577,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
     and a list of :py:class:`Surface`.
 
     :param surfaces: A sequence of :py:class:`Surface` objects. Default: ``[]``.
-    :type surfaces: Sequence[CircularSurface]
+    :type surfaces: Sequence[Surface]
     :param env_material: The material before the first surface.
     :type env_material: :py:class:`~dnois.mt.Material`
     """
@@ -585,7 +585,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
 
     def __init__(
         self,
-        surfaces: Sequence[CircularSurface] = None,
+        surfaces: Sequence[Surface] = None,
         env_material: mt.Material | str = 'vacuum',
     ):
         super().__init__()
@@ -596,7 +596,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
 
         # This is needed to facilitate MutableSequence operations
         # because torch.nn.ModuleList saves submodules like a dict rather than list
-        self._slist: list[CircularSurface] = []
+        self._slist: list[Surface] = []
         self._stop_idx = None
         #: Material before the first surface.
         self.env_material: mt.Material = env_material
@@ -613,11 +613,11 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         self._slist.__getitem__(key).context = None
         self._slist.__delitem__(key)
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> Surface:
         """:meta private:"""
         return self._slist.__getitem__(item)
 
-    def __iadd__(self, other: Sequence[CircularSurface]) -> Self:
+    def __iadd__(self, other: Sequence[Surface]) -> Self:
         """:meta private:"""
         self.extend(other)
         return self
@@ -634,13 +634,13 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         """:meta private:"""
         return SurfaceList(list(self._slist.__reversed__()), self.env_material)
 
-    def __setitem__(self, key: int, value: CircularSurface):
+    def __setitem__(self, key: int, value: Surface):
         """:meta private:"""
         self._welcome(value)
         super().__setitem__(key, value)
         self._slist.__setitem__(key, value)
 
-    def __add__(self, other: Sequence[CircularSurface]) -> 'SurfaceList':
+    def __add__(self, other: Sequence[Surface]) -> 'SurfaceList':
         """:meta private:"""
         return SurfaceList(self._slist + list(other), self.env_material)
 
@@ -654,7 +654,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         """:meta private:"""
         return super().__dir__() + ['env_material']
 
-    def append(self, surface: CircularSurface):
+    def append(self, surface: Surface):
         """:meta private:"""
         self._welcome(surface)
         super().append(surface)
@@ -666,35 +666,35 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         self._slist.clear()
         self._super_clear()
 
-    def count(self, value: CircularSurface) -> int:
+    def count(self, value: Surface) -> int:
         """:meta private:"""
         return self._slist.count(value)
 
-    def extend(self, surfaces: Sequence[CircularSurface]):
+    def extend(self, surfaces: Sequence[Surface]):
         """:meta private:"""
         self._welcome(*surfaces)
         super().extend(surfaces)
 
-    def index(self, value: CircularSurface, start: int = 0, stop: int = ...) -> int:
+    def index(self, value: Surface, start: int = 0, stop: int = ...) -> int:
         """:meta private:"""
         if stop is ...:
             return self._slist.index(value, start)
         else:
             return self._slist.index(value, start, stop)
 
-    def insert(self, index: int, surface: CircularSurface):
+    def insert(self, index: int, surface: Surface):
         """:meta private:"""
         self._welcome(surface)
         super().insert(index, surface)
         self._slist.insert(index, surface)
 
-    def pop(self, index: int = -1) -> CircularSurface:
+    def pop(self, index: int = -1) -> Surface:
         """:meta private:"""
         s = super().pop(index)
         s.context = None
         return s
 
-    def remove(self, value: CircularSurface):
+    def remove(self, value: Surface):
         """:meta private:"""
         idx = self.index(value)
         self.pop(idx)
@@ -708,7 +708,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
 
     def add_module(self, name: str, module: nn.Module):
         """:meta private:"""
-        if name.isdigit() and isinstance(module, CircularSurface):
+        if name.isdigit() and isinstance(module, Surface):
             self._slist.insert(int(name), module)
         super().add_module(name, module)
 
@@ -732,7 +732,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         return ray
 
     @property
-    def surfaces(self) -> list[CircularSurface]:
+    def surfaces(self) -> list[Surface]:
         """
         Returns a list of contained surfaces.
 
@@ -774,7 +774,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         return self._stop_idx
 
     @property
-    def stop(self) -> CircularSurface:
+    def stop(self) -> Surface:
         """
         The aperture stop object. Returns ``None`` if no stop is found.
         Note that it need not return an instance of :py:class:`CircularStop`.
@@ -784,10 +784,10 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         idx = self._stop_idx
         return None if idx is None else self._slist[idx]
 
-    def _welcome(self, *new: CircularSurface):
+    def _welcome(self, *new: Surface):
         for surface in new:
-            if self._force_surface and not isinstance(surface, CircularSurface):
-                msg = f'An instance of {CircularSurface.__name__} expected, got {type(surface)}'
+            if self._force_surface and not isinstance(surface, Surface):
+                msg = f'An instance of {Surface.__name__} expected, got {type(surface)}'
                 raise TypeError(msg)
             if surface.context is not None:
                 raise RuntimeError(f'A surface already contained in a lens group '

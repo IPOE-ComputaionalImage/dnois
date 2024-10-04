@@ -2,18 +2,19 @@ import json
 import math
 import warnings
 
+import matplotlib.pyplot as plt
 import torch
 
-import dnois.scene as _sc
-from dnois.base.typing import (
+from ... import scene as _sc
+from ...base import typing
+from ...base.typing import (
     Ts, Any, IO, Size2d, Vector, FovSeg, SclOrVec, SurfSample, Scalar, Self,
     scalar
 )
-
+from ...utils import wl2rgb, t4plot
 from ..system import RenderingOptics, Pinhole
 from .ray import BatchedRay
-from ._surf import SurfaceList
-from .surf import build_surface
+from .surf import build_surface, SurfaceList, Surface, CircularSurface
 
 __all__ = [
     'SequentialRayTracing',
@@ -25,6 +26,29 @@ DEFAULT_SPP: int = 256
 def _check_arg(arg: Any, n1: str, n2: str):
     if arg is not None:
         warnings.warn(f'{n1} and {n2} are given simultaneously, {n2} will be ignored')
+
+
+def _plot_set_ax(ax: plt.Axes, x_range: float):
+    ax.set_xlim(-x_range * 0.1, x_range * 1.01)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_position([0.1, 0.1, 0.8, 0.8])
+    ax.set_aspect('equal')
+
+
+def _plot_fov_alphas(n: int) -> list[float]:
+    return torch.linspace(1., 0.3, n).tolist()
+
+
+def _plot_rays_3d(ax: plt.Axes, start: Ts, end: Ts, valid: Ts, colors: list[str], alphas: list[float]):
+    # shape: N_wl x N_fov x N_spp x 3
+    for clr, wl_slc1, wl_slc2, v in zip(colors, start, end, valid):  # N_fov x N_spp x 3
+        for alpha, fov_slc1, fov_slc2, vv in zip(alphas, wl_slc1, wl_slc2, v):  # N_spp x 3
+            ax.plot(
+                (t4plot(fov_slc1[..., 2][vv]), t4plot(fov_slc2[..., 2][vv])),
+                (t4plot(fov_slc1[..., 1][vv]), t4plot(fov_slc2[..., 1][vv])),
+                color=clr, alpha=alpha, linewidth=0.5
+            )
 
 
 class SequentialRayTracing(RenderingOptics):
@@ -179,6 +203,7 @@ class SequentialRayTracing(RenderingOptics):
 
     @torch.no_grad()
     def focus_to_(self, z: Scalar) -> Self:  # TODO: focus to depth rather than z
+        """This method is subject to change."""
         z = scalar(z).to(self.device)
         z = z.clamp(-self.optical_infinity, 0)
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
@@ -203,6 +228,90 @@ class SequentialRayTracing(RenderingOptics):
         self.surfaces[-1].distance += move
 
         return self
+
+    @torch.no_grad()
+    def plot_cross_section(
+        self,
+        fov: Vector = None,
+        wl: Vector = None,
+        spp: int = 10,
+    ) -> plt.Figure:
+        """This method is subject to change."""
+        if fov is None:
+            fov_half = self.reference.fov_half
+            fov = [0., fov_half * 0.5 ** 0.5, fov_half]
+        if wl is None:
+            wl = self.wavelength
+        fov = typing.vector(fov, device=self.device)
+        wl = typing.vector(wl, device=self.device)
+
+        fig, ax = plt.subplots(figsize=(12.8, 9.6), subplot_kw={'frameon': False})
+
+        uppers = []
+        lowers = []
+        for sf in self.surfaces:  # surfaces
+            sf: Surface
+            y = torch.linspace(-sf.radius, sf.radius, 100, device=self.device)
+            z = sf.h_extended(torch.zeros_like(y), y) + sf.context.z
+            ax.plot(t4plot(z), t4plot(y), color='black', linewidth=1)
+            uppers.append((z[-1].item(), y[-1].item()))
+            lowers.append((z[0].item(), y[0].item()))
+        for i in range(len(self.surfaces) - 1):  # edges
+            if self.surfaces[i].material.name == 'vacuum':
+                continue
+            ax.plot(*list(zip(uppers[i], uppers[i + 1])), color='black', linewidth=1)
+            ax.plot(*list(zip(lowers[i], lowers[i + 1])), color='black', linewidth=1)
+        # sensor
+        diag_length = (self.sensor_size[0] ** 2 + self.sensor_size[1] ** 2) ** 0.5
+        y = torch.linspace(-diag_length / 2, diag_length / 2, 100, device=self.device)
+        ax.plot(
+            t4plot(torch.full_like(y, self.surfaces.total_length)), t4plot(y),
+            color='black', linewidth=2
+        )
+        # rays
+        total_length = self.surfaces.total_length.item()
+        sf1 = self.surfaces[0]
+        o_y = torch.linspace(-sf1.radius * 0.98, sf1.radius * 0.98, spp, device=self.device)
+        o = torch.stack([torch.zeros_like(o_y), o_y, torch.zeros_like(o_y)], -1)  # N_spp x 3
+        d = torch.stack([torch.zeros_like(fov), fov.tan(), torch.ones_like(fov)], dim=-1)
+        d = d.unsqueeze(1)  # N_fov x 1 x 3
+        ray = BatchedRay(o, d, wl.reshape(-1, 1, 1))  # N_wl x N_fov x N_spp
+        ray.norm_d_().broadcast_()
+        colors = [wl2rgb(_wl, output_format='hex') for _wl in wl.tolist()]
+        alphas = _plot_fov_alphas(fov.numel())
+        for sf in self.surfaces:
+            out_ray = sf(ray)
+            _plot_rays_3d(ax, ray.o, out_ray.o, out_ray.valid, colors, alphas)
+            ray = out_ray
+        out_ray = ray.march_to(total_length)
+        _plot_rays_3d(ax, ray.o, out_ray.o, out_ray.valid, colors, alphas)
+
+        _plot_set_ax(ax, total_length)
+        return fig
+
+    @torch.no_grad()
+    def plot_spot_diagram(self) -> plt.Figure:
+        """This method is subject to change."""
+        if self.sampling_mode != 'unipolar':
+            raise NotImplementedError()
+
+        fig, ax = plt.subplots(3, 1)
+
+        sf1 = self.surfaces[0]
+        if not isinstance(sf1, CircularSurface):
+            raise NotImplementedError()
+        x, y = sf1.sample(self.samples_per_point, self.sampling_mode)
+        o = torch.stack([x, y, torch.zeros_like(y)], -1)  # N_spp x 3
+
+        fov_half = self.reference.fov_half
+        fov = torch.tensor([0., fov_half * 0.5 ** 0.5, fov_half], device=self.device)
+        d = torch.stack([torch.zeros_like(fov), fov.tan(), torch.ones_like(fov)], dim=-1)
+        d = d.unsqueeze(1)  # N_fov x 1 x 3
+        ray = BatchedRay(o, d, ...)
+
+        # TODO: complete
+
+        return fig
 
     @property
     def reference(self) -> Pinhole:
@@ -271,10 +380,8 @@ class SequentialRayTracing(RenderingOptics):
 
     @classmethod
     def from_pyds(cls, info: dict[str, Any]) -> 'SequentialRayTracing':
-        # lens group
-        env_mt = info['environment_material']
-        surfaces = [build_surface(cfg) for cfg in info['surfaces']]
-        sl = SurfaceList(surfaces, env_mt)
+        # surfaces
+        sl = SurfaceList([build_surface(cfg) for cfg in info['surfaces']], info['environment_material'])
 
         # sensor
         sensor_cfg = info['sensor']
@@ -285,6 +392,18 @@ class SequentialRayTracing(RenderingOptics):
         kwargs = {}
         if 'render' in info:
             render_cfg = info['render']
-            if 'fov_segments' in render_cfg:
-                kwargs['fov_segments'] = render_cfg['fov_segments']
+
+            def _set(k):
+                if k in render_cfg:
+                    kwargs[k] = render_cfg[k]
+
+            _set('nominal_focal_length')
+            _set('wavelength')
+            _set('fov_segments')
+            _set('depth')
+            _set('depth_aware')
+            _set('polarized')
+            _set('coherent')
+            _set('samples_per_point')
+            _set('sampling_mode')
         return SequentialRayTracing(sl, pixel_num, pixel_size, **kwargs)
