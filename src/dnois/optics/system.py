@@ -119,7 +119,6 @@ class RenderingOptics(StandardOptics, TensorContainerMixIn, metaclass=abc.ABCMet
         Default: ``False``.
     :param bool coherent: Whether this model renders images coherently. Default: ``False``.
     """
-    _delegate_name = 'wavelength'
     optical_infinity: float = 1e3  #: Optical "infinite" depth.
 
     def __init__(
@@ -232,6 +231,9 @@ class RenderingOptics(StandardOptics, TensorContainerMixIn, metaclass=abc.ABCMet
                     raise ShapeError(f'probabilities must be a 1D tensor')
                 idx = torch.multinomial(probabilities, 1).squeeze().item()
             return depth[idx]
+
+    def _delegate(self) -> Ts:
+        return self.wavelength
 
     def _check_scene(self, scene: _sc.Scene):
         if not isinstance(scene, _sc.ImageScene):

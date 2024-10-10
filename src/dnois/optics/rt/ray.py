@@ -563,5 +563,5 @@ class BatchedRay(base.TensorContainerMixIn):
             raise base.ShapeError(f'Trying to assign a tensor with incompatible shape {shape} '
                                   f'to {name}, while shape of rays is {self.shape}')
 
-    def _delegate(self):  # for TensorContainerMixIn
+    def _delegate(self):
         return self._ts['o']

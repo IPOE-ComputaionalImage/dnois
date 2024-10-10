@@ -17,20 +17,27 @@ __all__ = [
 _empty = inspect.Parameter.empty
 
 
-def _getattr(obj, attr: str):
-    dlg_name: str = getattr(obj, '_delegate_name', '_delegate')
-    dlg = getattr(obj, dlg_name, ...)
-    if dlg is not ...:
-        if callable(dlg):
-            dlg = dlg()
-        return getattr(dlg, attr)
-    raise RuntimeError(f'A delegate object has to be specified to determine {attr}')
+class TensorAsDelegate:
+    def new_tensor(self, data, **kwargs) -> Ts:
+        return self._delegate().new_tensor(data, **kwargs)
+
+    def new_full(self, size, fill_value, **kwargs) -> Ts:
+        return self._delegate().new_full(size, fill_value, **kwargs)
+
+    def new_empty(self, size, **kwargs) -> Ts:
+        return self._delegate().new_empty(size, **kwargs)
+
+    def new_ones(self, size, **kwargs) -> Ts:
+        return self._delegate().new_ones(size, **kwargs)
+
+    def new_zeros(self, size, **kwargs) -> Ts:
+        return self._delegate().new_zeros(size, **kwargs)
+
+    def _delegate(self) -> Ts:
+        raise TypeError(f'No delegate attribute specified for class {self.__class__.__name__}')
 
 
-class DeviceMixIn:
-    _delegate: torch.Tensor
-    _delegate_name: str
-
+class DeviceMixIn(TensorAsDelegate):
     @property
     def device(self) -> torch.device:
         """
@@ -43,12 +50,10 @@ class DeviceMixIn:
 
         :type: :py:class:`torch.device`
         """
-        return _getattr(self, 'device')
+        return self._delegate().device
 
 
-class DtypeMixIn:
-    _delegate: torch.Tensor
-    _delegate_name: str
+class DtypeMixIn(TensorAsDelegate):
 
     @property
     def dtype(self) -> torch.dtype:
@@ -62,7 +67,7 @@ class DtypeMixIn:
 
         :type: :py:class:`torch.dtype`
         """
-        return _getattr(self, 'dtype')
+        return self._delegate().dtype
 
 
 class TensorContainerMixIn(DeviceMixIn, DtypeMixIn):

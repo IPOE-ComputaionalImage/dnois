@@ -129,7 +129,6 @@ class Surface(nn.Module, base.TensorContainerMixIn, metaclass=abc.ABCMeta):
     :param dict newton_config: Configuration for Newton's method.
         See :ref:`configuration_for_newtons_method` for details.
     """
-    _delegate_name = 'distance'
 
     def __init__(
         self,
@@ -216,6 +215,10 @@ class Surface(nn.Module, base.TensorContainerMixIn, metaclass=abc.ABCMeta):
         """
         pass
 
+    @abc.abstractmethod
+    def _valid_coordinates(self, x: Ts, y: Ts) -> Ts:
+        pass
+
     @overload
     def _valid(self, x: Ts, y: Ts) -> Ts:
         pass
@@ -224,16 +227,13 @@ class Surface(nn.Module, base.TensorContainerMixIn, metaclass=abc.ABCMeta):
     def _valid(self, ray: BatchedRay) -> Ts:
         pass
 
-    @abc.abstractmethod
     def _valid(self, *args, **kwargs) -> Ts:
-        """
-        Checks whether given rays whose origins are on the surface are valid.
-
-        :param BatchedRay ray: Rays to be checked.
-        :return: Flags of validity.
-        :rtype: torch.BoolTensor
-        """
-        pass
+        """Checks whether given rays whose origins are on the surface are valid."""
+        ba = base.get_bound_args(self._valid, *args, **kwargs)
+        if 'ray' in ba.arguments:  # _valid(self, ray: BatchedRay) -> Ts
+            return self._valid_ray(ba.arguments['ray'])
+        else:  # _valid(self, x: Ts, y: Ts) -> Ts
+            return self._valid_coordinates(ba.arguments['x'], ba.arguments['y'])
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
         """
@@ -356,6 +356,9 @@ class Surface(nn.Module, base.TensorContainerMixIn, metaclass=abc.ABCMeta):
         ray.update_valid_(nt2.squeeze(-1) > 0, 'copy').norm_d_()
         return ray
 
+    def _delegate(self) -> Ts:
+        return self.distance
+
     def _f(self, ray: BatchedRay) -> Ts:
         return self.h_extended(ray.x, ray.y) + self.context.z - ray.z
 
@@ -368,6 +371,19 @@ class Surface(nn.Module, base.TensorContainerMixIn, metaclass=abc.ABCMeta):
         descent = f_value / (derivative_value + self._nt_epsilon)
         descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
         return descent
+
+    def _valid_ray(self, ray: BatchedRay) -> Ts:
+        return self._valid_coordinates(ray.x, ray.y)
+
+
+def _circular_valid_impl(self, *args, **kwargs):
+    ba = base.get_bound_args(self._valid, *args, **kwargs)
+    if 'ray' in ba.arguments:  # _valid(self, ray: BatchedRay) -> Ts
+        ray: BatchedRay = ba.arguments['ray']
+        return ray.x.square() + ray.y.square() <= self.radius ** 2
+    else:  # _valid(self, x: Ts, y: Ts) -> Ts
+        x, y = ba.arguments['x'], ba.arguments['y']
+        return x.square() + y.square() <= self.radius ** 2
 
 
 class CircularSurface(Surface, metaclass=abc.ABCMeta):
@@ -422,17 +438,6 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
             repeated computation if already computed outside this method.
         :return: Corresponding value of two partial derivatives.
         :rtype: tuple[Tensor, Tensor]
-        """
-        pass
-
-    @property
-    @abc.abstractmethod
-    def geo_radius(self) -> Ts:
-        """
-        Geometric radius of the surface, i.e. maximum radial distance that makes
-        the surface function mathematically meaningful. A 0D tensor.
-
-        :type: Tensor
         """
         pass
 
@@ -522,25 +527,24 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         else:
             raise ValueError(f'Unknown sampling mode: {mode}')
 
+    @property
+    def geo_radius(self) -> Ts:
+        """
+        Geometric radius of the surface, i.e. maximum radial distance that makes
+        the surface function mathematically meaningful. A 0D tensor.
+
+        :type: Tensor
+        """
+        return self.new_tensor(self.radius)
+
+    def _valid_coordinates(self, x: Ts, y: Ts) -> Ts:
+        return x.square() + y.square() <= self.radius ** 2
+
+    def _valid_ray(self, ray: BatchedRay) -> Ts:
+        return ray.r2 <= self.radius ** 2
+
     def _f(self, ray: BatchedRay) -> Ts:
         return self.h_extended_r2(ray.r2) + self.context.z - ray.z
-
-    @overload
-    def _valid(self, x: Ts, y: Ts) -> Ts:
-        pass
-
-    @overload
-    def _valid(self, ray: BatchedRay) -> Ts:
-        pass
-
-    def _valid(self, *args, **kwargs) -> Ts:
-        ba = base.get_bound_args(self._valid, *args, **kwargs)
-        if 'ray' in ba.arguments:  # _valid(self, ray: BatchedRay) -> Ts
-            ray: BatchedRay = ba.arguments['ray']
-            return ray.x.square() + ray.y.square() <= self.radius ** 2
-        else:  # _valid(self, x: Ts, y: Ts) -> Ts
-            x, y = ba.arguments['x'], ba.arguments['y']
-            return x.square() + y.square() <= self.radius ** 2
 
     def _f_grad(self, ray: BatchedRay) -> Ts:
         phpx, phpy = self.h_grad_extended(ray.x, ray.y, ray.r2)
@@ -562,10 +566,6 @@ class CircularStop(CircularSurface):
 
     def h_r2(self, r2: Ts) -> Ts:
         return torch.zeros_like(r2)
-
-    @property
-    def geo_radius(self) -> Ts:
-        return torch.tensor(self.radius, device=self.device, dtype=self.dtype)
 
 
 class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.MutableSequence):
@@ -613,7 +613,7 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         self._slist.__getitem__(key).context = None
         self._slist.__delitem__(key)
 
-    def __getitem__(self, item) -> Surface:
+    def __getitem__(self, item):
         """:meta private:"""
         return self._slist.__getitem__(item)
 
@@ -783,6 +783,16 @@ class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.Muta
         """
         idx = self._stop_idx
         return None if idx is None else self._slist[idx]
+
+    def _delegate(self) -> Ts:
+        if len(self._slist) > 0:
+            return self._slist[0]._delegate()
+        elif isinstance(self.env_material, nn.Module):
+            try:
+                return next(self.env_material.parameters())
+            except StopIteration:
+                pass
+        return torch.tensor(0.)  # default device and dtype of PyTorch
 
     def _welcome(self, *new: Surface):
         for surface in new:

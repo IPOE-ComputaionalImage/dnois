@@ -3,8 +3,8 @@ from torch import nn
 
 from . import _surf
 from ._surf import *
-from ...base.typing import Any, Ts, Scalar, Vector, scalar, vector
 from ... import mt
+from ...base.typing import Any, Ts, Scalar, Vector, scalar, vector
 
 __all__ = [
     'build_surface',
