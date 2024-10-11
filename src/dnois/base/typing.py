@@ -22,6 +22,7 @@ __all__ = [
     'scalar',
     'scl_or_vec',
     'size2d',
+    'sizend',
     'vector',
 
     'ConvOut',
@@ -31,6 +32,7 @@ __all__ = [
     'Scalar',
     'SclOrVec',
     'Size2d',
+    'Sizend',
     'Spacing',
     'SurfSample',
     'Tensor',
@@ -54,6 +56,7 @@ Vector = Union[float, Sequence[float], Ts]  # can be converted to 1d tensor
 SclOrVec = Union[float, Sequence[float], Ts]  # Scalar or Vector
 
 Size2d = Union[int, tuple[int, int]]
+Sizend = Union[int, Sequence[int]]
 
 # options
 FovSeg = Literal['paraxial', 'pointwise']
@@ -72,6 +75,19 @@ def size2d(size: Size2d) -> tuple[int, int]:
         return cast(tuple[int, int], size)
     else:
         raise ValueError(f'An int or a pair of int expected, got {type(size)}')
+
+
+def sizend(size: Sizend, ndim: int = None) -> list[int]:
+    if isinstance(size, int):
+        return [size for _ in range(ndim)]
+    elif isinstance(size, Sequence):
+        if not all(isinstance(s, int) for s in size):
+            raise ValueError(f'A sequence of int expected, got {size}')
+        if ndim is not None and len(size) != ndim:
+            raise ValueError(f'{ndim} integers expected, got {len(size)}')
+        return list(size)
+    else:
+        raise ValueError(f'An int or a sequence of int expected, got {type(size)}')
 
 
 def vector(arg: Vector, dtype: _dty = None, device: Device = None, **kwargs) -> Ts:

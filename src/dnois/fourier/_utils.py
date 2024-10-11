@@ -1,10 +1,9 @@
 import torch
-from torch.nn import functional
 
-from dnois.base.typing import Ts, Spacing
+from dnois.base.typing import Ts, Spacing, Sequence
 
 
-def _check_dim(name: str, shape: torch.Size, dims: tuple[int, ...], **deltas: Spacing):
+def _check_dim(name: str, shape: Sequence[int], dims: tuple[int, ...], **deltas: Spacing):
     ndim = len(shape)
     dims = [dim % ndim - ndim for dim in dims]
     for k, delta in deltas.items():
@@ -25,31 +24,3 @@ def _mul(x: Ts, *fs: Spacing) -> Ts:
         if f is not None:
             x = x * f
     return x
-
-
-def _div(x: Ts, *fs: Spacing) -> Ts:
-    for f in fs:
-        if f is not None:
-            x = x / f
-    return x
-
-
-def _reorder(x: Ts, dims: tuple[int, ...]) -> Ts:
-    target_dims = tuple(i - len(dims) for i in range(len(dims)))
-    if dims == target_dims:
-        return x
-
-    for target_dim, dim in zip(target_dims, dims):
-        x = torch.transpose(x, dim, target_dim)
-    return x
-
-
-def _pad_in_dims(dims: tuple[int, ...], pad: tuple[int, ...], *tensors: Ts) -> list[Ts]:
-    return [
-        _reorder(functional.pad(_reorder(t, dims), pad, 'constant', 0), dims)
-        for t in tensors
-    ]
-
-
-def _pad(t: Ts, dims: tuple[int, ...], pad: tuple[int, ...]) -> Ts:
-    return _reorder(functional.pad(_reorder(t, dims), pad, 'constant', 0), dims)

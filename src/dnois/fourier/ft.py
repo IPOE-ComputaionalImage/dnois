@@ -1,52 +1,9 @@
-r"""
-.. testsetup::
-
-    import torch
-    from dnois.fourier import ft1
-
-These functions compute fourier transform or its inverse for signals
-defined on an interval or region which is symmetric w.r.t. the origin.
-They differ from vanilla Discrete Fourier Transform (DFT) provided by
-:py:mod:`torch.fft` in that correct scale and shift are considered and
-thus serve as numerical approximation to continuous fourier transform.
-
-For example, the function :py:func:`ft1` computes the 1D Fourier transform of signal
-:math:`f`. Given signal length :math:`N`, assuming :math:`f[k]` represents sampled values on
-points :math:`\{k\delta_f\}_{k=-\lfloor N/2\rfloor}^{\lfloor(N-1)/2\rfloor}`
-where :math:`\delta_f` is sampling interval, then  :py:func:`ft1`  computes
-
-.. math::
-    \ft\{f\}[l]=h[l]=\sum_{k=-\lfloor N/2\rfloor}^{\lfloor(N-1)/2\rfloor}
-    f[k]\e^{-\i 2\pi k\delta_f\times l\delta_h}\delta_f,
-    l=-\lfloor\frac{N}{2}\rfloor,\cdots,\lfloor\frac{N-1}{2}\rfloor
-
-where :math:`\delta_h=1/(N\delta_f)` is sampling interval in frequency domain.
-Indices :math:`-\lfloor\frac{N}{2}\rfloor, \cdots,\lfloor\frac{N-1}{2}\rfloor`
-for :math:`k` and :math:`l` correspond to ``0``, ..., ``N-1`` in the given array.
-In other words, this function works like
-
->>> from torch.fft import fft, fftshift, ifftshift
->>>
->>> f = torch.rand(9)
->>> h1 = ft1(f, 0.1)
->>> h2 = fftshift(fft(ifftshift(f))) * 0.1
->>> torch.allclose(h1, h2)
-True
-
-.. note::
-
-    The sampling interval (like ``delta`` argument for :py:func:`ft1`) will be
-    multiplied to transformed signal if given, so it can be a :py:class:`float`
-    or a tensor with shape broadcastable to original signal. But if it is not a
-    0D tensor, its size on the dimensions to be transformed must be 1.
-"""
 # TODO: spectrum-shift FT
-import torch
 import torch.fft as _fft
 
 from dnois.base.typing import Ts, Spacing
 
-from ._utils import _check_dim, _div, _mul
+from ._utils import _check_dim, _mul
 
 __all__ = [
     'ft1',
@@ -54,6 +11,13 @@ __all__ = [
     'ft2',
     'ift2',
 ]
+
+
+def _div(x: Ts, *fs: Spacing) -> Ts:
+    for f in fs:
+        if f is not None:
+            x = x / f
+    return x
 
 
 def ft1(f: Ts, delta: Spacing = None, dim: int = -1) -> Ts:
