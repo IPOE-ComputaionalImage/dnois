@@ -94,7 +94,7 @@ class Context:
             'This may be because the surface has been removed from the lens group.')
 
 
-class Surface(nn.Module, base.TensorContainerMixIn, metaclass=abc.ABCMeta):
+class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
     r"""
     Base class for optical surfaces in a group of lens.
     The position of a surface in a lens group is specified by a single z-coordinate,
@@ -568,7 +568,7 @@ class CircularStop(CircularSurface):
         return torch.zeros_like(r2)
 
 
-class SurfaceList(nn.ModuleList, base.TensorContainerMixIn, collections.abc.MutableSequence):
+class SurfaceList(base.TensorContainerMixIn, nn.ModuleList, collections.abc.MutableSequence):
     """
     A sequential container of surfaces. This class is derived from
     :py:class:`torch.nn.ModuleList` and implements

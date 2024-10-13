@@ -43,7 +43,7 @@ class DeviceMixIn(TensorAsDelegate):
         """
         Device of this object.
 
-        Some :py:class:`torch.Tensor`s may be associated to an object of the class
+        Some :py:class:`torch.Tensor` s may be associated to an object of the class
         (e.g. buffers and parameters of :py:class:`torch.nn.Module`)
         possessing this property. They are assumed to be on the same device,
         which is the value of this property.
@@ -54,13 +54,12 @@ class DeviceMixIn(TensorAsDelegate):
 
 
 class DtypeMixIn(TensorAsDelegate):
-
     @property
     def dtype(self) -> torch.dtype:
         """
         Data type of this object.
 
-        Some :py:class:`torch.Tensor`s may be associated to an object of the class
+        Some :py:class:`torch.Tensor` s may be associated to an object of the class
         (e.g. buffers and parameters of :py:class:`torch.nn.Module`)
         possessing this property. They are assumed to have same data type,
         which is the value of this property.

@@ -114,6 +114,8 @@ class Constant(Material):
     Material with constant optical properties.
 
     :param float n: Constant refractive index.
+
+    See :class:`Material` for descriptions for other parameters.
     """
 
     def __init__(
@@ -145,6 +147,8 @@ class Cauchy(Material):
     :param float a: :math:`A` in Cauchy formula.
     :param float b: :math:`B` in Cauchy formula.
     :param float c: :math:`C` in Cauchy formula.
+
+    See :class:`Material` for descriptions for other parameters.
     """
     __slots__ = ('a', 'b', 'c')
 
@@ -178,6 +182,8 @@ class Schott(Material):
         n^2=a_0+a_1\lambda^2+a_2\lambda^{-2}+a_3\lambda^{-4}+a_4\lambda^{-6}+a_5\lambda^{-8}
 
     :param list[float] coefficients: The six coefficients in Schott formula.
+
+    See :class:`Material` for descriptions for other parameters.
     """
     __slots__ = ('coefficients',)
 
@@ -243,6 +249,8 @@ def _make_sellmeier(num: int, n_terms: int) -> type[_Sellmeier]:
         
     :param list[float] ks: The coefficients :math:`K_i,i=1,\cdots,{n_terms}` in Sellmeier{num} formula.
     :param list[float] ls: The coefficients :math:`L_i,i=1,\cdots,{n_terms}` in Sellmeier{num} formula.
+    
+    See :class:`Material` for descriptions for other parameters.
     """
     return cast(type[_Sellmeier], cls)
 
@@ -264,6 +272,8 @@ class Sellmeier2(Material):
     :param float b2: :math:`B_2` in Sellmeier2 formula.
     :param float wl1: :math:`\lambda_1` in Sellmeier2 formula.
     :param float wl2: :math:`\lambda_2` in Sellmeier2 formula.
+
+    See :class:`Material` for descriptions for other parameters.
     """
     __slots__ = ('a_pp', 'b1', 'b2', 'swl1', 'swl2')
 
@@ -304,6 +314,8 @@ class Sellmeier4(Material):
     :param float c: :math:`C` in Sellmeier4 formula.
     :param float d: :math:`D` in Sellmeier4 formula.
     :param float e: :math:`E` in Sellmeier4 formula.
+
+    See :class:`Material` for descriptions for other parameters.
     """
     __slots__ = ('a', 'b', 'c', 'd', 'e')
 
@@ -343,6 +355,8 @@ class Herzberger(Material):
         L=\frac{1}{\lambda^2-0.028}
 
     :param list[float] coefficients: The six coefficients in Herzberger formula.
+
+    See :class:`Material` for descriptions for other parameters.
     """
     __slots__ = ('coefficients',)
 
@@ -378,6 +392,8 @@ class Conrady(Material):
     :param float n0: :math:`n_0` in Conrady formula.
     :param float a: :math:`A` in Conrady formula.
     :param float b: :math:`B` in Conrady formula.
+
+    See :class:`Material` for descriptions for other parameters.
     """
     __slots__ = ('n0', 'a', 'b')
 

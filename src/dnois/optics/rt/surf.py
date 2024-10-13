@@ -197,5 +197,22 @@ class EvenAspherical(Conic):
         return self.coefficients.size(0)
 
 
+class PlanarPhase(Surface):
+    def h(self, x: Ts, y: Ts) -> Ts:
+        pass
+
+    def h_extended(self, x: Ts, y: Ts) -> Ts:
+        pass
+
+    def h_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        pass
+
+    def h_grad_extended(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        pass
+
+    def _valid_coordinates(self, x: Ts, y: Ts) -> Ts:
+        pass
+
+
 def build_surface(surface_config: dict[str, Any]) -> CircularSurface:
     raise NotImplementedError()

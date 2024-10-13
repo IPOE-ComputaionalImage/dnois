@@ -4,6 +4,8 @@ Fourier Transform and Convolution
 
 .. automodule:: dnois.fourier
 
+.. _ref_fourier_fourier_transform:
+
 ********************************
 Fourier transform
 ********************************
@@ -42,6 +44,10 @@ In other words, this function works like
 >>> torch.allclose(h1, h2)
 True
 
+Multiplication with sampling interval is necessary if consistent scale
+with continuous Fourier transform is desired, which is called *DFT-scale*.
+Otherwise, it can be set to ``None``.
+
 The following example illustrates its approximation to continuous Fourier transform,
 as well as its precision in a simple occasion for 32-bit float.
 
@@ -51,9 +57,6 @@ as well as its precision in a simple occasion for 32-bit float.
 >>> g = torch.exp(-torch.pi * fx.square())  # ground truth spectrum
 >>> torch.allclose(ft1(y, 4e-3).real, g, atol=1e-6)
 True
-
-Multiplication with sampling interval is necessary to ensure consistent scale
-with continuous Fourier transform, which is optional.
 
 .. note::
 

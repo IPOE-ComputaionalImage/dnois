@@ -15,7 +15,6 @@ Materials
 ****************************
 .. autosummary::
     :toctree: ../generated/mt
-    :template: autosummary/mt_class.rst
 
     Cauchy
     Conrady

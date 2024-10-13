@@ -76,7 +76,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         return self.pixel_size[0] * self.pixel_num[0], self.pixel_size[1] * self.pixel_num[1]
 
 
-class RenderingOptics(StandardOptics, TensorContainerMixIn, metaclass=abc.ABCMeta):
+class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMeta):
     """
     TODO
 
