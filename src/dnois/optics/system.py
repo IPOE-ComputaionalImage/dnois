@@ -137,7 +137,7 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
         if not isinstance(fov_segments, str):
             fov_segments = size2d(fov_segments)
         if wavelength is None:
-            wavelength = FRAUNHOFER_LINES['d']
+            wavelength = FRAUNHOFER_LINES['d']  # self.wavelength is assumed to never be None
         wavelength = vector(wavelength)
         if isinstance(depth, tuple) and len(depth) == 2 and all(torch.is_tensor(t) for t in depth):
             if depth[0].ndim != 0 or depth[1].ndim != 0:
@@ -159,17 +159,34 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
         else:
             self.register_buffer('depth_min', depth[0], False)
             self.register_buffer('depth_max', depth[1], False)
-        self.depth: Ts | tuple[Ts, Ts] = depth  #: Depth values if a scene has no depth information.
+        #: Depth values used when a scene has no depth information.
+        self.depth: Ts | tuple[Ts, Ts] = depth
 
     @abc.abstractmethod
-    def psf(
+    def psf_on_grid(
         self,
         wavelength: Vector = None,
         fov_segments: FovSeg | Size2d = None,
-        depth_map: Ts = None,
         depth: Vector = None,
         polarized: bool = False,
     ) -> Ts:  # X x Y x D x P x C x H x W
+        pass
+
+    @abc.abstractmethod
+    def psf_on_points(self, points: Ts, wl: Vector = None, polarized: bool = False) -> Ts:
+        r"""
+        Returns PSF of points in object space given by ``points``.
+
+        :param Tensor points: Source points of which to evaluate PSF. A tensor with shape
+            ``(..., 3)`` where the last dimension indicates coordinates of points in lens'
+            coordinate system.
+        :param wl: Wavelengths to evaluate PSF on. Default: wavelength of ``self``.
+        :type wl: float, Sequence[float] or Tensor
+        :param bool polarized: Whether to evaluate polarized PSF. Default: ``False``.
+        :return: Conditioned PSF. A tensor with shape :math:`(\cdots, N_P, N_\lambda, H, W)`
+            if ``polarized`` is ``True``, or :math:`(\cdots, N_\lambda, H, W)` otherwise.
+        :rtype: Tensor
+        """
         pass
 
     def forward(self, scene: _sc.Scene, **kwargs) -> Ts:
@@ -210,16 +227,83 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
                 warnings.warn(warning_str.format('polarized'))
 
         # PSF shape: (D x )(P x )C x H x W
-        psf = self.psf(fov_segments='paraxial', **kwargs)
+        psf = self.psf_on_grid(fov_segments='paraxial', **kwargs)
         raise NotImplementedError()
 
+    def get_depth(self, sampling_curve: Callable[[Ts], Ts] = None, n: int = None) -> Ts:
+        r"""
+        Returns a 1D tensor representing a series of depths, inferred from :attr:`.depth`:
+
+        - If :attr:`.depth` is a pair of 0D tensor, i.e. lower and upper bound of depth,
+          returns a tensor with length ``n`` whose values are
+
+          .. math::
+            \text{depth}=\text{depth}_\min+(\text{depth}_\max-\text{depth}_\min)\times \Gamma(t).
+
+          where :math:`t` is drawn uniformly from :math:`[0,1]`. An optional ``sampling_curve``
+          (denoted by :math:`\Gamma`) can be given to control its values.
+          By default, :math:`\Gamma` is constructed so that the inverse of depth is evenly spaced.
+        - If a 0D tensor, returns it but as a 1D tensor with length one.
+        - If a 1D tensor, returns it as-is.
+
+        :param sampling_curve: Sampling curve :math:`\Gamma`,
+            only makes sense in the first case above. Default: omitted.
+        :type sampling_curve: Callable[[Tensor], Tensor]
+        :param int n: Number of depths, only makes sense in the first case above. Default: omitted.
+        :return: 1D tensor of depths.
+        :rtype: Tensor
+        """
+        depth = self.depth
+        if isinstance(depth, tuple):  # [min, max]
+            if n is None:
+                raise TypeError(f'Number of depths must be given because only the lower and '
+                                f'upper bound is specified for depth')
+            d1, d2 = self.depth_min, self.depth_max
+            t = torch.linspace(0, 1, n, device=d2.device, dtype=d2.dtype)
+            if sampling_curve is not None:
+                t = sampling_curve(t)
+            else:
+                t = d1 * t / (d2 - (d2 - d1) * t)  # default sampling curve
+            return d1 + (d2 - d1) * t
+        elif sampling_curve is not None or n is not None:
+            warnings.warn(f'sampling_curve and n are ignored because self.depth is a tensor')
+        if self.depth.ndim == 0:  # fixed depth
+            return depth.reshape(1)
+        else:  # a sequence of depths
+            return depth
+
     def sample_depth(self, sampling_curve: Callable[[Ts], Ts] = None, probabilities: Ts = None) -> Ts:
+        r"""
+        Randomly sample a depth and returns it, inferred from :attr:`.depth`:
+
+        - If :attr:`.depth` is a pair of 0D tensor, i.e. lower and upper bound of depth, returns
+
+          .. math::
+            \text{depth}=\text{depth}_\min+(\text{depth}_\max-\text{depth}_\min)\times \Gamma(t).
+
+          where :math:`t` is drawn uniformly from :math:`[0,1]`. An optional ``sampling_curve``
+          (denoted by :math:`\Gamma`) can be given to control its distribution.
+          By default, :math:`\Gamma` is constructed so that the inverse of depth is evenly spaced.
+        - If a 0D tensor, returns it as-is.
+        - If a 1D tensor, randomly draws a value from it. Corresponding probability
+          distribution can be given by ``probabilities``.
+
+        :param sampling_curve: Sampling curve :math:`\Gamma`,
+            only makes sense in the first case above. Default: omitted.
+        :type sampling_curve: Callable[[Tensor], Tensor]
+        :param Tensor probabilities: A 1D tensor with same length as :attr:`.depth`,
+            only makes sense in the third case above. Default: omitted.
+        :return: A 0D tensor of randomly sampled depth.
+        :rtype: Tensor
+        """
         depth = self.depth
         if isinstance(depth, tuple):  # randomly sampling from a depth range
             d1, d2 = self.depth_min, self.depth_max
             t = torch.rand_like(d2)
             if sampling_curve is not None:
                 t = sampling_curve(t)
+            else:
+                t = d1 * t / (d2 - (d2 - d1) * t)  # default sampling curve
             return d1 + (d2 - d1) * t
         elif depth.ndim == 0:  # fixed depth
             return depth
@@ -240,6 +324,12 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
             raise RuntimeError(f'{self.__class__.__name__} only supports ImageScene at present')
         if scene.n_plr != 0:
             raise RuntimeError(f'{self.__class__.__name__} does not support polarization currently')
+
+    def _get_wl(self, wl: Vector = None) -> Ts:  # 1D tensor
+        if wl is None:
+            return self.wavelength
+        else:
+            return vector(wl, self.dtype, self.device)
 
 
 class Pinhole(StandardOptics):

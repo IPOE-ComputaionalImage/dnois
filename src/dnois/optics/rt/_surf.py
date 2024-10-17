@@ -8,7 +8,7 @@ from .ray import BatchedRay
 from ... import mt, base
 from ...base.typing import (
     Sequence, Ts, Any, Callable, Scalar, Self, Size2d, SurfSample,
-    scalar, overload, size2d,
+    scalar, overload, size2d, pair
 )
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     'NT_THRESHOLD_STRICT',
     'NT_UPDATE_BOUND',
 
+    'BatchedRay',
     'CircularSurface',
     'Context',
     'Surface',
@@ -32,6 +33,11 @@ NT_EPSILON: float = 1e-9
 
 SAMPLE_LIMIT: float = 1 - 1e-4
 EDGE_CUTTING: float = 1 - 1e-5
+
+
+def _dist_transform(x: Ts, curve: Callable[[Ts], Ts]) -> Ts:
+    magnitude = curve(x.abs())
+    return magnitude.copysign(x)
 
 
 class Context:
@@ -121,6 +127,10 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         All the quantities with length dimension is represented in meters.
         They include value of coordinates, optical path length and wavelength, etc.
 
+    :param size: Physical size of effective region of the surface,
+        in vertical and horizontal directions. If a single float, it indicates the
+        width of a square region.
+    :type size: float or tuple[float, float]
     :param material: Material following the surface. Either a :py:class:`~dnois.mt.Material`
         instance or a str representing the name of a registered material.
     :type material: :py:class:`~dnois.mt.Material` or str
@@ -132,6 +142,7 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
 
     def __init__(
         self,
+        size: float | tuple[float, float],
         material: mt.Material | str,
         distance: Scalar,
         newton_config: dict[str, Any] = None
@@ -142,6 +153,8 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
             raise ValueError('distance must not be negative')
         if newton_config is None:
             newton_config = {}
+        #: Physical size of effective region of the surface, in vertical and horizontal directions.
+        self.size: tuple[float, float] = pair(size)
         #: Material following the surface.
         self.material: mt.Material = material if isinstance(material, mt.Material) else mt.get(material)
         #: Distance between the surface and the next one.
@@ -356,6 +369,44 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         ray.update_valid_(nt2.squeeze(-1) > 0, 'copy').norm_d_()
         return ray
 
+    def sample_rectangular(self, n: Size2d, sampling_curve: Callable[[Ts], Ts]) -> tuple[Ts, Ts]:
+        n = size2d(n)
+        xy = [torch.linspace(
+            -SAMPLE_LIMIT, SAMPLE_LIMIT, _n, device=self.device, dtype=self.dtype
+        ) for _n in n]
+        if sampling_curve is not None:
+            xy = [_dist_transform(x_or_y, sampling_curve) for x_or_y in xy]
+        x, y = torch.meshgrid(*xy, indexing='xy')  # both 2D
+        x, y = x.flatten() * self.size[1] / 2, y.flatten() * self.size[0] / 2
+        mask = self._valid(x, y)
+        return x[mask], y[mask]
+
+    def sample_random(self, n: int, sampling_curve: Callable[[Ts], Ts] = None) -> tuple[Ts, Ts]:
+        """
+        Sample points on the baseline plane randomly.
+        This method is subject to change.
+        """
+        xy = [torch.rand(n, device=self.device, dtype=self.dtype) * 2 - 1 for _ in range(2)]
+        if sampling_curve is not None:
+            xy = [_dist_transform(x_or_y, sampling_curve) for x_or_y in xy]
+        x, y = xy[1] * self.size[1] / 2, xy[0] * self.size[0] / 2
+        mask = self._valid(x, y)
+        return x[mask], y[mask]
+
+    def sample(self, n: Size2d, mode: SurfSample, **kwargs) -> tuple[Ts, Ts]:
+        """
+        Sample points on the baseline plane in a regular grid.
+        This method is subject to change.
+
+        TODO: doc
+        """
+        if mode == 'rectangular':
+            return self.sample_rectangular(n, **kwargs)
+        elif mode == 'random':
+            return self.sample_random(n, **kwargs)
+        else:
+            raise ValueError(f'Unknown sampling mode: {mode}')
+
     def _delegate(self) -> Ts:
         return self.distance
 
@@ -374,16 +425,6 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
 
     def _valid_ray(self, ray: BatchedRay) -> Ts:
         return self._valid_coordinates(ray.x, ray.y)
-
-
-def _circular_valid_impl(self, *args, **kwargs):
-    ba = base.get_bound_args(self._valid, *args, **kwargs)
-    if 'ray' in ba.arguments:  # _valid(self, ray: BatchedRay) -> Ts
-        ray: BatchedRay = ba.arguments['ray']
-        return ray.x.square() + ray.y.square() <= self.radius ** 2
-    else:  # _valid(self, x: Ts, y: Ts) -> Ts
-        x, y = ba.arguments['x'], ba.arguments['y']
-        return x.square() + y.square() <= self.radius ** 2
 
 
 class CircularSurface(Surface, metaclass=abc.ABCMeta):
@@ -412,7 +453,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         distance: Scalar,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(material, distance, newton_config)
+        super().__init__(radius * 2, material, distance, newton_config)
         self.radius: float = radius  #: Radius of circular aperture of the surface.
 
     @abc.abstractmethod
@@ -475,19 +516,6 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         lim2 = self.geo_radius.square()
         return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2))
 
-    def sample_rectangular(self, n: Size2d, sampling_curve: Callable[[Ts], Ts]) -> tuple[Ts, Ts]:
-        n = size2d(n)
-        xy = [torch.linspace(
-            -SAMPLE_LIMIT, SAMPLE_LIMIT, _n, device=self.device, dtype=self.dtype
-        ) for _n in n]
-        if sampling_curve is not None:
-            xy = [sampling_curve(x_or_y[_n // 2:]) for x_or_y, _n in zip(xy, n)]
-            xy = [torch.cat((-x_or_y.flip([0])[:_n // 2], x_or_y)) for x_or_y, _n in zip(xy, n)]
-        x, y = torch.meshgrid(*xy, indexing='xy')  # both 2D
-        x, y = x.flatten() * self.radius, y.flatten() * self.radius
-        mask = self._valid(x, y)
-        return x[mask], y[mask]
-
     def sample_unipolar(self, n: Size2d) -> tuple[Ts, Ts]:
         n = size2d(n)
         zero = torch.tensor(0., dtype=self.dtype, device=self.device)
@@ -502,10 +530,6 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         return r * t.cos(), r * t.sin()
 
     def sample_random(self, n: int, sampling_curve: Callable[[Ts], Ts] = None) -> tuple[Ts, Ts]:
-        """
-        Sample points on the baseline plane randomly.
-        This method is subject to change.
-        """
         t = torch.rand(n, device=self.device, dtype=self.dtype) * (2 * torch.pi)
         r = torch.rand(n, device=self.device, dtype=self.dtype)
         if sampling_curve is not None:
@@ -514,10 +538,6 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         return r * t.cos(), r * t.sin()
 
     def sample(self, n: Size2d, mode: SurfSample, **kwargs) -> tuple[Ts, Ts]:
-        """
-        Sample points on the baseline plane in a regular grid.
-        This method is subject to change.
-        """
         if mode == 'unipolar':
             return self.sample_unipolar(n)
         elif mode == 'rectangular':
@@ -582,6 +602,7 @@ class SurfaceList(base.TensorContainerMixIn, nn.ModuleList, collections.abc.Muta
     :type env_material: :py:class:`~dnois.mt.Material`
     """
     _force_surface: bool = True
+    __call__: Callable[..., BatchedRay]  # for return type hint in IDE
 
     def __init__(
         self,

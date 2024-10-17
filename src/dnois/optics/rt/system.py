@@ -5,11 +5,11 @@ import warnings
 import matplotlib.pyplot as plt
 import torch
 
-from ... import scene as _sc
+from ... import scene as _sc, base
 from ...base import typing
 from ...base.typing import (
     Ts, Any, IO, Size2d, Vector, FovSeg, SclOrVec, SurfSample, Scalar, Self,
-    scalar
+    scalar, size2d
 )
 from ...utils import wl2rgb, t4plot
 from ..system import RenderingOptics, Pinhole
@@ -54,22 +54,23 @@ def _plot_rays_3d(ax: plt.Axes, start: Ts, end: Ts, valid: Ts, colors: list[str]
 class SequentialRayTracing(RenderingOptics):
     """
     A class of sequential and ray-tracing-based optical system model.
+    See :class:`~dnois.optics.RenderingOptics` for descriptions of more parameters.
 
     :param SurfaceList surfaces: Optical surfaces.
     :param samples_per_point: Number of sampling rays for each object point.
-        A single int for ``random`` mode or a 2-tuple of ints
-        for ``rectangular`` and ``circular`` mode.
+        See :meth:`CircularSurface.sample` for more details. Default: 256.
     :type samples_per_point: int or tuple[int, int]
-    :param str sampling_mode: Mode for sampling rays. Choices (default: ``random``):
-
-        ``random``
-            Rays are sampled randomly (see :py:meth:`Surface.sample_random`).
-
-        ``rectangular``
-            Rays are sampled on evenly spaced rectangular grid.
-
-        ``circular``
-            Rays are sampled on evenly spaced circular grid.
+    :param str sampling_mode: Mode for sampling rays.
+        See :meth:`CircularSurface.sample` for more details. Default: ``random``.
+    :param bool final_superposition_coherent: Whether to use coherent superposition
+        to compute final PSF. If ``True``, use the algorithm in
+        *"Chen, S., Feng, H., Pan, D., Xu, Z., Li, Q., & Chen, Y. (2021).
+        Optical aberrations correction in postprocessing using imaging simulation.
+        ACM Transactions on Graphics (TOG), 40(5), 1-15."*, otherwise that in
+        *"Yang, X., Fu, Q., Elhoseiny, M., & Heidrich, W. (2023).
+        Aberration-aware depth-from-focus.
+        IEEE Transactions on Pattern Analysis and Machine Intelligence."*
+        This must be ``True`` if ``coherent`` is ``True``. Default: same as ``coherent``.
     """
 
     def __init__(
@@ -86,41 +87,70 @@ class SequentialRayTracing(RenderingOptics):
         coherent: bool = False,
         samples_per_point: int | tuple[int, int] = 256,
         sampling_mode: SurfSample = 'random',
+        final_superposition_coherent: bool = None,
+        psf_size: Size2d = None,
     ):
         super().__init__(
             pixel_num, pixel_size, nominal_focal_length, wavelength,
             fov_segments, depth, depth_aware, polarized, coherent,
         )
+        if final_superposition_coherent is None:
+            final_superposition_coherent = coherent
+        if self.coherent and not final_superposition_coherent:
+            raise ValueError(f'final_superposition_coherent must be True when coherent is True')
         if isinstance(samples_per_point, int) and sampling_mode in ('rectangular', 'circular'):
             raise TypeError(f'A pair of int expected for samples_per_point when sampling_mode '
                             f'is {sampling_mode}, got {samples_per_point}')
         elif isinstance(samples_per_point, tuple) and sampling_mode == 'random':
             raise TypeError(f'A single int expected for samples_per_point when sampling_mode is '
                             f'random, got {samples_per_point}')
+        if psf_size is None:
+            raise NotImplementedError()
         self.surfaces: SurfaceList = surfaces  #: Surface list.
         #: Number of sampling rays when computing a PSF.
-        #: A single int for random sample, or a pair of int representing
-        #: the numbers along two directions.
+        #: See :meth:`CircularSurface.sample` for more details.
         self.samples_per_point: int | tuple[int, int] = samples_per_point
-        #: Mode for sampling on a surface, either ``rectangular``, ``unipolar`` or ``random``.
+        #: Mode for sampling on a surface.
+        #: See :meth:`CircularSurface.sample` for more details.
         self.sampling_mode: SurfSample = sampling_mode
+        #: Whether to use coherent superposition to compute final PSF. See above descriptions.
+        self.final_superposition_coherent: bool = final_superposition_coherent
+        self.psf_size: tuple[int, int] = size2d(psf_size)  #: Height and width of evaluated PSF.
 
-    def psf(
+    def psf_on_grid(
         self,
         wavelength: Vector = None,
         fov_segments: FovSeg | Size2d = None,
-        depth_map: Ts = None,
-        depth: Vector = None,
+        depths: Vector | int = None,
         polarized: bool = False
     ) -> Ts:
         raise NotImplementedError()
+
+    def psf_on_points(self, points: Ts, wl: Vector = None, polarized: bool = False) -> Ts:
+        if polarized:
+            raise NotImplementedError()
+        if points.ndim < 1 or points.size(-1) != 3:
+            raise base.ShapeError(f'Size of last dimension of points must be 3, '
+                                  f'but its shape is {points.shape}')
+        wl = self._get_wl(wl)
+
+        o = points.unsqueeze(-2).unsqueeze(-2)  # ... 1 x 1 x 3
+        x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
+        points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1)  # N_spp x 3
+        d = points.unsqueeze(-2) - o.unsqueeze(-2)  # ... x N_spp x 1 x 3
+        ray = BatchedRay(o, d, wl.unsqueeze(-1))  # ... x N_spp x N_wl
+        ray.norm_d_()
+
+        out_ray = self.surfaces(ray)
+        if self.final_superposition_coherent:
+            return self._final_ray2psf_coherent(out_ray)
+        else:
+            return self._final_ray2psf_incoherent(out_ray)
 
     def pointwise_render(
         self,
         scene: _sc.ImageScene,
         vignette: bool = True,
-        samples_per_point: int | tuple[int, int] = None,
-        sampling_mode: SurfSample = None,
     ) -> Ts:
         self._check_scene(scene)
         if self.polarized or scene.n_plr != 0:
@@ -132,22 +162,19 @@ class SequentialRayTracing(RenderingOptics):
                              f'got {scene.n_wl}')
         if len(self.surfaces) == 0:
             raise RuntimeError(f'No surface available')
-        sampling_mode = sampling_mode or self.sampling_mode
-        samples_per_point = samples_per_point or self.samples_per_point
 
         scene = scene.batch()
         device = self.device
         rm = self.reference
         n_b, n_wl, n_h, n_w = scene.image.shape
 
-        warning_str = (f'Trying to render a {{0}} image by an instance of '
-                       f'{self.__class__.__name__} that does not support it')
         depth = None  # B x H x W
         if scene.depth_aware:
             if self.depth_aware:
                 depth = scene.depth
             else:
-                warnings.warn(warning_str.format('depth aware'))
+                warnings.warn(f'Trying to render a depth-aware image by an instance of '
+                              f'{self.__class__.__name__} that does not support it')
         if depth is None:
             depth = torch.stack([self.sample_depth() for _ in range(n_b)])
             depth = depth.reshape(-1, 1, 1).expand(-1, n_h, n_w)
@@ -156,10 +183,9 @@ class SequentialRayTracing(RenderingOptics):
         x = x * math.tan(rm.fov_half_x) * depth
         y = torch.linspace(1, -1, n_h, device=device).unsqueeze(-1)  # from top to bottom
         y = y * math.tan(rm.fov_half_y) * depth
-        o = torch.stack([x, y, -depth], -1)  # B x H x W x 3
-        # TODO: currently depth=0 plane is assumed to be z=0 plane, which is incorrect
+        o = torch.stack([x, y, self.depth2z(depth)], -1)  # B x H x W x 3
 
-        x0, y0 = self.surfaces[0].sample(samples_per_point, sampling_mode)
+        x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
         spp = x0.numel()
         points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1)  # N_spp x 3
         o = o.unsqueeze(-2).unsqueeze(-5)
@@ -170,8 +196,7 @@ class SequentialRayTracing(RenderingOptics):
         ray.to_(device=device)
         ray.norm_d_()
 
-        out_ray: BatchedRay = self.surfaces(ray)
-        out_ray.march_to_(self.surfaces.total_length)
+        out_ray = self._obj2img(ray)
 
         x, y = out_ray.x / self.pixel_size[1], out_ray.y / self.pixel_size[0]
         x, y = x + self.pixel_num[1] / 2, y + self.pixel_num[0] / 2
@@ -201,10 +226,25 @@ class SequentialRayTracing(RenderingOptics):
         image = image[..., :-2, :-2] / spp
         return image
 
+    def depth2z(self, depth: float | Ts) -> Ts:
+        """
+        Converts depth to z-coordinate in lens system.
+
+        :param depth: Depth.
+        :type depth: float | Tensor
+        :return: Z-coordinate in lens system.
+        :rtype: Tensor
+        """
+        # TODO: currently depth=0 plane is assumed to be z=0 plane, which is incorrect
+        if not torch.is_tensor(depth):
+            depth = torch.tensor(depth, device=self.device, dtype=self.dtype)
+        return -depth
+
     @torch.no_grad()
-    def focus_to_(self, z: Scalar) -> Self:  # TODO: focus to depth rather than z
+    def focus_to_(self, depth: Scalar) -> Self:
         """This method is subject to change."""
-        z = scalar(z).to(self.device)
+        depth = scalar(depth).to(self.device)
+        z = self.depth2z(depth)
         z = z.clamp(-self.optical_infinity, 0)
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
 
@@ -216,8 +256,7 @@ class SequentialRayTracing(RenderingOptics):
         ray = BatchedRay(o, d, wl)  # N_wl x N_spp
         ray.norm_d_()
 
-        out_ray: BatchedRay = self.surfaces(ray)
-        out_ray.march_to_(self.surfaces.total_length)
+        out_ray = self._obj2img(ray)
 
         # solve marching distance by least square
         t = -(out_ray.x * out_ray.d_x + out_ray.y * out_ray.d_y)
@@ -407,3 +446,16 @@ class SequentialRayTracing(RenderingOptics):
             _set('samples_per_point')
             _set('sampling_mode')
         return SequentialRayTracing(sl, pixel_num, pixel_size, **kwargs)
+
+    # protected
+    # ========================
+
+    def _obj2img(self, ray: BatchedRay) -> BatchedRay:
+        out_ray: BatchedRay = self.surfaces(ray)
+        return out_ray.march_to_(self.surfaces.total_length)
+
+    def _final_ray2psf_coherent(self, ray: BatchedRay) -> Ts:
+        raise NotImplementedError()
+
+    def _final_ray2psf_incoherent(self, ray: BatchedRay) -> Ts:
+        raise NotImplementedError()

@@ -3,7 +3,7 @@ from torch import nn
 
 from . import _surf
 from ._surf import *
-from ... import mt
+from ... import mt, base
 from ...base.typing import Any, Ts, Scalar, Vector, scalar, vector
 
 __all__ = [
@@ -11,6 +11,7 @@ __all__ = [
 
     'Conic',
     'EvenAspherical',
+    'PlanarPhase',
     'Spherical',
     'Standard',
 ]
@@ -197,21 +198,110 @@ class EvenAspherical(Conic):
         return self.coefficients.size(0)
 
 
+def _diff(x: Ts, d: float, dim: int) -> Ts:
+    s = x.size(dim)
+    diff_central = (x.narrow(dim, 2, s - 2) - x.narrow(dim, 0, s - 2)) / (2 * d)  # central difference
+    diff_lower = (x.narrow(dim, 1, 1) - x.narrow(dim, 0, 1)) / d  # forward difference
+    diff_upper = (x.narrow(dim, -1, 1) - x.narrow(dim, -2, 1)) / d  # backward difference
+    diff = torch.cat([diff_lower, diff_central, diff_upper], dim)
+    return diff
+
+
+def _coordinate2index(x: Ts, n: int) -> tuple[Ts, Ts]:
+    if n % 2 == 0:  # even
+        x_cell = x.floor() + 0.5  # round to nearest half integers
+    else:  # odd
+        x_cell = x.round()  # round to nearest integers
+    idx = x_cell + (n - 1) / 2
+    return idx.int().clamp(0, n - 1), x - x_cell
+
+
 class PlanarPhase(Surface):
+    """
+    This class is subject to change.
+    """
+
+    def __init__(
+        self,
+        radius: float,
+        phase: Ts,  # small row index means small y coordinate
+        material: mt.Material | str,
+        distance: Scalar,
+        optimize_phase: bool = True,
+        newton_config: dict[str, Any] = None
+    ):
+        super().__init__(radius * 2, material, distance, newton_config)
+        self.radius: float = radius  #: Radius of circular aperture of the surface.
+        if phase.ndim != 2:
+            raise base.ShapeError(f'Shape of phase must be 2D, but got {phase.shape}')
+        # no constraint on value of phase currently
+        self.phase = nn.Parameter(phase, requires_grad=optimize_phase)  #: Phase shift.
+
     def h(self, x: Ts, y: Ts) -> Ts:
-        pass
+        return torch.zeros_like(torch.broadcast_tensors(x, y)[0])
 
     def h_extended(self, x: Ts, y: Ts) -> Ts:
-        pass
+        return torch.zeros_like(torch.broadcast_tensors(x, y)[0])
 
     def h_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
-        pass
+        return torch.zeros_like(x), torch.zeros_like(y)
 
     def h_grad_extended(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
-        pass
+        return torch.zeros_like(x), torch.zeros_like(y)
+
+    def intercept(self, ray: BatchedRay) -> BatchedRay:
+        new_ray = ray.march_to(self.context.z)
+        new_ray.update_valid_(self._valid(ray), 'copy')
+        return new_ray
+
+    def phase_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        p = self.phase  # N_y x N_x
+        dy, dx = self.cell_size
+        grad_y = _diff(self.phase, dy, 0)  # N_y x N_x
+        grad_x = _diff(self.phase, dx, 1)  # N_y x N_x
+
+        y, x = y.clamp(-self.radius, self.radius), x.clamp(-self.radius, self.radius)
+        y, x = y / dy, x / dx
+        y_idx, y_bias = _coordinate2index(y, p.size(0) - 1)  # row index for upper left
+        x_idx, x_bias = _coordinate2index(x, p.size(1) - 1)  # col index for upper left
+        y_idx2, x_idx2 = y_idx + 1, x_idx + 1  # indices for lower right
+
+        # bilinear interpolation
+        y_w = torch.stack([0.5 - y_bias, 0.5 + y_bias], -1).unsqueeze(-2)  # ... x 1 x 2
+        x_w = torch.stack([0.5 - x_bias, 0.5 + x_bias], -1).unsqueeze(-1)  # ... x 2 x 1
+        grad_y_points = torch.stack([
+            torch.stack([grad_y[y_idx, x_idx], grad_y[y_idx, x_idx2]], -1),
+            torch.stack([grad_y[y_idx2, x_idx], grad_y[y_idx2, x_idx2]], -1),
+        ], -1)  # ... x 2 x 2
+        grad_x_points = torch.stack([
+            torch.stack([grad_x[y_idx, x_idx], grad_x[y_idx, x_idx2]], -1),
+            torch.stack([grad_x[y_idx2, x_idx], grad_x[y_idx2, x_idx2]], -1),
+        ], -1)  # ... x 2 x 2
+        return (y_w @ grad_x_points @ x_w).squeeze(-2, -1), (y_w @ grad_y_points @ x_w).squeeze(-2, -1)
+
+    def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        ray = ray.clone(False).norm_d_()
+        n1 = self.context.material_before.n(ray.wl, 'm')
+        n2 = self.material.n(ray.wl, 'm')
+        inv_k = ray.wl / (2 * torch.pi)
+        phase_x, phase_y = self.phase_grad(ray.x, ray.y)
+
+        ndx = (n1 * ray.d_x + inv_k * phase_x) / n2
+        ndy = (n1 * ray.d_y + inv_k * phase_y) / n2
+        ndz2 = 1 - ndx.square() - ndy.square()
+        new_d = torch.stack([ndx, ndy, ndz2.clamp(min=0).sqrt()], dim=-1)
+
+        ray.d = new_d
+        ray._d_normed = True
+        ray.update_valid_(ndz2 >= 0, 'copy')
+        return ray
+
+    @property
+    def cell_size(self) -> tuple[float, float]:
+        return 2 * self.radius / (self.phase.size(0) - 2), 2 * self.radius / (self.phase.size(1) - 2)
 
     def _valid_coordinates(self, x: Ts, y: Ts) -> Ts:
-        pass
+        return x.square() + y.square() <= self.radius ** 2
 
 
 def build_surface(surface_config: dict[str, Any]) -> CircularSurface:

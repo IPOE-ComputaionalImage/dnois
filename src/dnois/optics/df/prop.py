@@ -106,13 +106,13 @@ def _init_ft_common(
         if ampl_phase_form:
             cache['quadratic_phase'] = quadratic_phase
         else:
-            cache['quadratic_phase_factor'] = utils.expi(quadratic_phase)
+            cache['quadratic_phase_factor'] = base.expi(quadratic_phase)
 
     if phase_factor:
         y, x = utils.sym_grid(2, grid_size, (dy, dx))
         _post_phase = phase_scale[..., None, None] * (x.square() + y.square())
         _post_phase += 2 * torch.pi * distance.unsqueeze(-4) / wl - torch.pi / 2
-        cache['phase_factor'] = utils.expi(_post_phase)
+        cache['phase_factor'] = base.expi(_post_phase)
 
     if scale_factor:
         cache['scale_factor'] = 1 / prod[..., None, None]  # N_d x N_wl x 1 x 1
@@ -144,7 +144,7 @@ def _init_as_common(
         phase_scale = phase_scale[..., None, None]
         argument = phase_scale * rou2
         argument += kd[..., None, None]
-        transfer = utils.expi(argument)
+        transfer = base.expi(argument)
     else:
         max_delta = max(dx.max().item(), dy.max().item())
         if max_delta > wl.max().item() / 2:
@@ -158,7 +158,7 @@ def _init_as_common(
         mask = under_sqrt > 0
         factor = torch.where(mask, torch.sqrt(under_sqrt), torch.zeros_like(under_sqrt))
         argument = kd[..., None, None] * factor
-        transfer = utils.expi(argument)
+        transfer = base.expi(argument)
         transfer = torch.where(mask, transfer, torch.zeros_like(transfer))
     return {'transfer': transfer}
 
@@ -197,7 +197,7 @@ def _init_conv_common(
         argument = phase_scale * lateral_r2
         if phase_factor:
             argument = argument + (k * distance - torch.pi / 2)
-        kernel = utils.expi(argument)
+        kernel = base.expi(argument)
         if scale_factor:
             kernel = kernel / wl_d_prod
     else:
@@ -249,7 +249,7 @@ def _ft_common(
         if argument_available:
             phase = pupil[1] + intermediate['quadratic_phase']
             if pupil[0].dtype == torch.bool:
-                _phase_factor = utils.expi(phase)
+                _phase_factor = base.expi(phase)
                 pupil = torch.where(pupil[0], _phase_factor, torch.zeros_like(_phase_factor))
             else:
                 pupil = torch.polar(pupil[0], phase)

@@ -47,7 +47,7 @@ class NoValidRayError(RuntimeError):
 
 
 # WARNING: do not modify the tensors in this class in an in-place manner
-# TODO: deal with floating-point error
+# TODO: deal with floating-point error, cases where wl is None
 class BatchedRay(base.TensorContainerMixIn):
     r"""
     A class representing a batch of rays, which means both the origin and direction are
