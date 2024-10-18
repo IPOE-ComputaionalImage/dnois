@@ -25,15 +25,6 @@ Image manipulation
     partition_padded
     merge_patches
 
-**********************************
-Computation
-**********************************
-.. autosummary::
-    :toctree: ../generated/utils/computation
-
-    abs2
-    expi
-
 *********************************
 PyTorch Module
 *********************************

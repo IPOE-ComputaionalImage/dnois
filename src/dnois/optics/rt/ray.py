@@ -4,7 +4,7 @@ import warnings
 import torch
 
 from ... import base
-from ...base.typing import Ts, Literal, Self
+from ...base.typing import Ts, Literal, Self, Callable
 
 __all__ = [
     'BatchedRay',
@@ -47,7 +47,7 @@ class NoValidRayError(RuntimeError):
 
 
 # WARNING: do not modify the tensors in this class in an in-place manner
-# TODO: deal with floating-point error, cases where wl is None
+# TODO: deal with floating-point error
 class BatchedRay(base.TensorContainerMixIn):
     r"""
     A class representing a batch of rays, which means both the origin and direction are
@@ -85,11 +85,7 @@ class BatchedRay(base.TensorContainerMixIn):
     :type init_phase: float or Tensor
     """
 
-    __slots__ = (
-        '_d_normed',
-        '_o_modified',
-        '_ts',
-    )
+    __slots__ = ('_d_normed', '_o_modified', '_ts',)
 
     def __init__(
         self,
@@ -117,14 +113,11 @@ class BatchedRay(base.TensorContainerMixIn):
             'd': direction,
             'wl': wl,
             'v': torch.tensor(True, dtype=torch.bool, device=device),
+            'opl': init_opl,
+            'ph': init_phase,
         }
         self._d_normed = False
         self._o_modified = False
-
-        if init_opl is not None:
-            self._ts['opl'] = init_opl
-        if init_phase is not None:
-            self._ts['ph'] = init_phase
 
     def __repr__(self):
         shape, recording_opl, recording_phase = self.shape, self.recording_opl, self.recording_phase
@@ -138,7 +131,10 @@ class BatchedRay(base.TensorContainerMixIn):
         """
         shape = self.shape
         for k in list(self._ts.keys()):
-            self._ts[k] = torch.broadcast_to(self._ts[k], (shape + (3,)) if k in ('o', 'd') else shape)
+            v = self._ts[k]
+            if v is None:
+                continue
+            self._ts[k] = torch.broadcast_to(v, (shape + (3,)) if k in ('o', 'd') else shape)
         return self
 
     def clone(self, deep: bool = False) -> 'BatchedRay':
@@ -152,10 +148,10 @@ class BatchedRay(base.TensorContainerMixIn):
         :rtype: :py:class:`BatchedRay`
         """
         new_ray = copy.copy(self)
-        new_ray._ts = new_ray._ts.copy()
         if deep:
-            for k in list(new_ray._ts):
-                new_ray._ts[k] = new_ray._ts[k].clone()
+            new_ray._ts = {k: v.clone() for k, v in self._ts.items()}
+        else:
+            new_ray._ts = new_ray._ts.copy()
         return new_ray
 
     def discard_(self) -> Ts:
@@ -169,26 +165,24 @@ class BatchedRay(base.TensorContainerMixIn):
             of remaining rays.
         :rtype: torch.LongTensor
         """
-        if len(self.shape) != 1:
+        if self.ndim != 1:
             raise RuntimeError(f'{self.discard_.__name__} can only be called on 1D array of rays')
-        valid = torch.argwhere(self.valid)  # N_valid x 1
-        valid = valid.squeeze()  # N_valid
-        if valid.size(0) == self._ts['v'].size(0):  # all valid
+        v = self.valid
+        if v.ndim == 0:
+            v = v.unsqueeze(0)
+        valid = torch.argwhere(v).squeeze(-1)  # N_valid
+        if valid.size(0) == v.size(0):  # all valid
             return valid
+        elif valid.size(0) == 0:  # no valid
+            raise NoValidRayError(f'There is no valid ray before discarding')
 
-        def _discard(ts: Ts) -> Ts:
-            if ts.ndim == 1 or ts.size(-2) == 1:
-                ts = torch.broadcast_to(ts, (self.shape[0], 3))
+        def _discard(k: str, ts: Ts) -> Ts:
+            additional_dim = 1 if k in ('o', 'd') else 0
+            if ts.ndim == additional_dim or ts.size(0) == 1:  # ([3, ]) or (1[, 3])
+                return ts
             return ts[valid]
 
-        self._ts['v'] = self._ts['v'][valid]
-        self._ts['o'] = _discard(self._ts['o'])  # N_valid x 3
-        self._ts['d'] = _discard(self._ts['d'])  # N_valid x 3
-        self._ts['wl'] = self._ts['wl'][valid]  # N_valid
-        if self.recording_opl:
-            self._ts['opl'] = self._ts['opl'][valid]  # N_valid
-        if self.recording_phase:
-            self._ts['ph'] = self._ts['ph'][valid]
+        self._update_tensor(_discard)
         return valid
 
     def flatten_(self) -> Self:
@@ -198,14 +192,14 @@ class BatchedRay(base.TensorContainerMixIn):
         :return: self
         """
         shape = self.shape
-        self._ts['v'] = torch.flatten(self.valid.broadcast_to(shape))
-        self._ts['o'] = torch.flatten(self.o.broadcast_to(shape + (3,)), 0, -2)
-        self._ts['d'] = torch.flatten(self.d.broadcast_to(shape + (3,)), 0, -2)
-        self._ts['wl'] = torch.flatten(self.wl.broadcast_to(shape))
-        if self.recording_opl:
-            self._ts['opl'] = torch.flatten(self.opl.broadcast_to(shape))
-        if self.recording_phase:
-            self._ts['ph'] = torch.flatten(self.phase.broadcast_to(shape))
+
+        def _flatten(k: str, v: Ts) -> Ts:
+            if k in ('o', 'd'):
+                return torch.flatten(v.broadcast_to(shape + (3,)), 0, -2)
+            else:
+                return torch.flatten(v.broadcast_to(shape))
+
+        self._update_tensor(_flatten)
         return self
 
     def copy_valid_(self) -> Self:
@@ -224,17 +218,18 @@ class BatchedRay(base.TensorContainerMixIn):
         v = v.broadcast_to(self.shape)
         idx = v.nonzero(as_tuple=False)[0]  # The indices of the first valid element
         idx = idx.tolist()
-        o, d = self._ts['o'].broadcast_to(v.shape + (3,)), self._ts['d'].broadcast_to(v.shape + (3,))
-        self.o = torch.where(v.unsqueeze(-1), o, o[*idx].clone())
-        self.d = torch.where(v.unsqueeze(-1), d, d[*idx].clone())
-        wl = self._ts['wl'].broadcast_to(v.shape)
-        self.wl = torch.where(v, wl, wl[*idx].clone())
-        if self.recording_opl:
-            opl = self._ts['opl'].broadcast_to(v.shape)
-            self.opl = torch.where(v, opl, opl[*idx].clone())
-        if self.recording_phase:
-            phase = self._ts['ph'].broadcast_to(v.shape)
-            self.opl = torch.where(v, phase, phase[*idx].clone())
+
+        def _copy(k: str, ts: Ts) -> Ts | None:
+            if k == 'v':  # do not copy validity
+                return None
+            elif k in ('o', 'd'):
+                ts = ts.broadcast_to(v.shape + (3,))
+                return torch.where(v.unsqueeze(-1), ts, ts[*idx].clone())
+            else:
+                ts = ts.broadcast_to(v.shape)
+                return torch.where(v, ts, ts[*idx].clone())
+
+        self._update_tensor(_copy)
         return self
 
     def march(self, t: Ts, n: float | Ts = None) -> 'BatchedRay':
@@ -256,12 +251,12 @@ class BatchedRay(base.TensorContainerMixIn):
         _opl, _ph = self.recording_opl, self.recording_phase
         if _opl or _ph:
             if n is None:
-                warnings.warn('Refractive index not specified for coherent rays')
+                warnings.warn('Refractive index not specified for coherent rays, assumed to be 1')
             opl = t if n is None else n * t
             if _opl:
                 self.opl = self.opl + opl
             if _ph:
-                self.phase = self.phase + 2 * torch.pi * self.wl * opl
+                self.phase = self.phase + base.wave_vec(self.wl) * opl
         return self
 
     def march_to(self, z: Ts, n: float | Ts = None) -> 'BatchedRay':
@@ -308,12 +303,19 @@ class BatchedRay(base.TensorContainerMixIn):
         :param kwargs: Keyword arguments accepted by :py:meth:`torch.Tensor.to`.
         :return: self
         """
-        for k in list(self._ts.keys()):
-            nt = self._ts[k].to(*args, **kwargs)
+
+        def _to(k: str, v: Ts) -> Ts:
+            nv = v.to(*args, **kwargs)
             if k == 'v':
-                nt = nt.to(torch.bool)
-            self._ts[k] = nt
+                nv = nv.to(torch.bool)
+            return nv
+
+        self._update_tensor(_to)
         return self
+
+    def update_valid(self, valid: Ts, action: Literal['discard', 'copy'] = None) -> Self:
+        """Out-of-place version of :meth:`.update_valid`."""
+        return self.clone().update_valid_(valid, action)
 
     def update_valid_(self, valid: Ts, action: Literal['discard', 'copy'] = None) -> Self:
         """
@@ -342,8 +344,15 @@ class BatchedRay(base.TensorContainerMixIn):
 
         :type: torch.Size
         """
-        shapes = [ts.shape[:-1] if k in ('o', 'd') else ts.shape for k, ts in self._ts.items()]
+        shapes = [
+            ts.shape[:-1] if k in ('o', 'd') else ts.shape
+            for k, ts in self._ts.items() if ts is not None
+        ]
         return torch.broadcast_shapes(*shapes)
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
 
     @property
     def o(self) -> Ts:
@@ -359,7 +368,7 @@ class BatchedRay(base.TensorContainerMixIn):
         if value.ndim < 1:
             raise base.ShapeError(f'Non-scalar tensor expected, got shape ({value.shape})')
         self._check_shape(value.shape[:-1], 'origin')
-        self._ts['o'] = value.to(self._ts['o'])
+        self._ts['o'] = self._cast(value)
         self._o_modified = True
 
     @property
@@ -379,7 +388,7 @@ class BatchedRay(base.TensorContainerMixIn):
         if value.ndim < 1:
             raise base.ShapeError(f'Non-scalar tensor expected, got shape ({value.shape})')
         self._check_shape(value.shape[:-1], 'direction')
-        self._ts['d'] = value.to(self._ts['d'])
+        self._ts['d'] = self._cast(value)
         self._d_normed = False
 
     @property
@@ -405,7 +414,7 @@ class BatchedRay(base.TensorContainerMixIn):
     @wl.setter
     def wl(self, value: Ts):
         self._check_shape(value.shape, 'wavelength')
-        self._ts['wl'] = value.to(self._ts['wl'])
+        self._ts['wl'] = self._cast(value)
 
     @property
     def valid(self) -> Ts:
@@ -421,7 +430,7 @@ class BatchedRay(base.TensorContainerMixIn):
         if value.dtype != torch.bool:
             raise TypeError('Rays\' validity flag must be a bool tensor.')
         self._check_shape(value.shape, 'validity')
-        self._ts['v'] = value.to(self._ts['v'])
+        self._ts['v'] = value.to(device=self.device)  # cannot call _cast
 
     @property
     def opl(self) -> Ts | None:
@@ -435,14 +444,12 @@ class BatchedRay(base.TensorContainerMixIn):
 
         :type: Tensor
         """
-        return self._ts.get('opl', None)
+        return self._ts['opl']
 
     @opl.setter
     def opl(self, value: Ts):
         self._check_shape(value.shape, 'OPL')
-        if value.lt(0).any():
-            raise ValueError('OPL must be non-negative.')
-        self._ts['opl'] = value.to(self._ts['opl'])
+        self._ts['opl'] = self._cast(value)
 
     @property
     def phase(self) -> Ts | None:
@@ -456,15 +463,24 @@ class BatchedRay(base.TensorContainerMixIn):
 
         :type: Tensor
         """
-        return self._ts.get('ph', None)
+        return self._ts['ph']
 
     @phase.setter
     def phase(self, value: Ts):
         self._check_shape(value.shape, 'phase')
-        value = value.to(self._ts['ph'])
+        value = self._cast(value)
         if value.lt(0).any() or value.gt(2 * torch.pi).any():
             value = value.remainder(2 * torch.pi)
         self._ts['ph'] = value
+
+    @property
+    def with_wl(self) -> bool:
+        """
+        Whether wavelengths are set.
+
+        :type: bool
+        """
+        return self._ts['wl'] is not None
 
     @property
     def recording_opl(self) -> bool:
@@ -473,7 +489,7 @@ class BatchedRay(base.TensorContainerMixIn):
 
         :type: bool
         """
-        return 'opl' in self._ts
+        return self._ts['opl'] is not None
 
     @property
     def recording_phase(self) -> bool:
@@ -482,7 +498,7 @@ class BatchedRay(base.TensorContainerMixIn):
 
         :type: bool
         """
-        return 'ph' in self._ts
+        return self._ts['ph'] is not None
 
     @property
     def x(self) -> Ts:
@@ -557,6 +573,14 @@ class BatchedRay(base.TensorContainerMixIn):
         :type: Tensor
         """
         return self._ts['d'][..., 2]
+
+    def _update_tensor(self, fn: Callable[[str, Ts], Ts | None]):
+        for k in list(self._ts.keys()):
+            v = self._ts[k]
+            if v is not None:
+                result = fn(k, v)
+                if result is not None:
+                    self._ts[k] = result
 
     def _check_shape(self, shape: tuple[int, ...], name: str):
         if not base.broadcastable(shape, self.shape):

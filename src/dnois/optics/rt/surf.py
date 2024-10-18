@@ -4,7 +4,7 @@ from torch import nn
 from . import _surf
 from ._surf import *
 from ... import mt, base
-from ...base.typing import Any, Ts, Scalar, Vector, scalar, vector
+from ...base.typing import Any, Ts, Scalar, Vector, scalar, vector, pair
 
 __all__ = [
     'build_surface',
@@ -37,9 +37,10 @@ class _SphericalBase(CircularSurface):
         radius: float,
         material: mt.Material | str,
         distance: Scalar,
+        aperture: Aperture = None,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(radius, material, distance, newton_config)
+        super().__init__(radius, material, distance, aperture, newton_config)
         self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
 
     def h_r2(self, r2: Ts) -> Ts:
@@ -80,9 +81,10 @@ class Spherical(_SphericalBase):
         radius: float,
         material: mt.Material | str,
         distance: Scalar,
+        aperture: Aperture = None,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(roc, radius, material, distance, newton_config)
+        super().__init__(roc, radius, material, distance, aperture, newton_config)
 
 
 class Conic(_SphericalBase):
@@ -111,9 +113,10 @@ class Conic(_SphericalBase):
         radius: float,
         material: mt.Material | str,
         distance: Scalar,
+        aperture: Aperture = None,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(roc, radius, material, distance, newton_config)
+        super().__init__(roc, radius, material, distance, aperture, newton_config)
         self.conic: nn.Parameter = nn.Parameter(scalar(conic))  #: Conic coefficient.
 
     def h_r2(self, r2: Ts) -> Ts:
@@ -167,9 +170,10 @@ class EvenAspherical(Conic):
         radius: float,
         material: mt.Material | str,
         distance: Scalar,
+        aperture: Aperture = None,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(roc, conic, radius, material, distance, newton_config)
+        super().__init__(roc, conic, radius, material, distance, aperture, newton_config)
         self.coefficients: nn.Parameter = nn.Parameter(vector(coefficients))  #: Aspherical coefficients.
 
     def h_r2(self, r2: Ts) -> Ts:
@@ -223,17 +227,23 @@ class PlanarPhase(Surface):
 
     def __init__(
         self,
-        radius: float,
+        size: float | tuple[float, float],
         phase: Ts,  # small row index means small y coordinate
         material: mt.Material | str,
         distance: Scalar,
+        aperture: Aperture = None,
         optimize_phase: bool = True,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(radius * 2, material, distance, newton_config)
-        self.radius: float = radius  #: Radius of circular aperture of the surface.
+        size = pair(size)
+        if aperture is None:
+            aperture = CircularAperture(min(size) / 2)
+        super().__init__(material, distance, aperture, newton_config)
+
         if phase.ndim != 2:
             raise base.ShapeError(f'Shape of phase must be 2D, but got {phase.shape}')
+        #: Physical size of effective region of the surface, in vertical and horizontal directions.
+        self.size: tuple[float, float] = size
         # no constraint on value of phase currently
         self.phase = nn.Parameter(phase, requires_grad=optimize_phase)  #: Phase shift.
 
@@ -251,7 +261,7 @@ class PlanarPhase(Surface):
 
     def intercept(self, ray: BatchedRay) -> BatchedRay:
         new_ray = ray.march_to(self.context.z)
-        new_ray.update_valid_(self._valid(ray), 'copy')
+        new_ray = self.aperture(new_ray)
         return new_ray
 
     def phase_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
@@ -260,7 +270,7 @@ class PlanarPhase(Surface):
         grad_y = _diff(self.phase, dy, 0)  # N_y x N_x
         grad_x = _diff(self.phase, dx, 1)  # N_y x N_x
 
-        y, x = y.clamp(-self.radius, self.radius), x.clamp(-self.radius, self.radius)
+        y, x = y.clamp(-self.size[0], self.size[0]), x.clamp(-self.size[1], self.size[1])
         y, x = y / dy, x / dx
         y_idx, y_bias = _coordinate2index(y, p.size(0) - 1)  # row index for upper left
         x_idx, x_bias = _coordinate2index(x, p.size(1) - 1)  # col index for upper left
@@ -293,15 +303,12 @@ class PlanarPhase(Surface):
 
         ray.d = new_d
         ray._d_normed = True
-        ray.update_valid_(ndz2 >= 0, 'copy')
+        ray.update_valid_(ndz2 >= 0)
         return ray
 
     @property
     def cell_size(self) -> tuple[float, float]:
-        return 2 * self.radius / (self.phase.size(0) - 2), 2 * self.radius / (self.phase.size(1) - 2)
-
-    def _valid_coordinates(self, x: Ts, y: Ts) -> Ts:
-        return x.square() + y.square() <= self.radius ** 2
+        return 2 * self.size[0] / (self.phase.size(0) - 2), 2 * self.size[1] / (self.phase.size(1) - 2)
 
 
 def build_surface(surface_config: dict[str, Any]) -> CircularSurface:

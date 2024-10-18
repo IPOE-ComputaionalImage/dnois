@@ -17,6 +17,17 @@ __all__ = [
 _empty = inspect.Parameter.empty
 
 
+def _check_consistency(attr: str, obj, ts: Ts, error: bool) -> bool:
+    v1, v2 = getattr(obj, attr), getattr(ts, attr)
+    if v1 != v2:
+        if error:
+            raise RuntimeError(f'{attr.capitalize()} mismatch: {v1} for an instance of '
+                               f'{obj.__class__.__name__} while {v2} for an incoming tensor')
+        else:
+            return False
+    return True
+
+
 class TensorAsDelegate:
     def new_tensor(self, data, **kwargs) -> Ts:
         return self._delegate().new_tensor(data, **kwargs)
@@ -38,6 +49,12 @@ class TensorAsDelegate:
 
 
 class DeviceMixIn(TensorAsDelegate):
+    def _check_consistency(self, ts: Ts, error: bool = True) -> bool:
+        return _check_consistency('device', self, ts, error)
+
+    def _cast(self, ts: Ts) -> Ts:
+        return ts.to(device=self.device)
+
     @property
     def device(self) -> torch.device:
         """
@@ -54,6 +71,12 @@ class DeviceMixIn(TensorAsDelegate):
 
 
 class DtypeMixIn(TensorAsDelegate):
+    def _check_consistency(self, ts: Ts, error: bool = True) -> bool:
+        return _check_consistency('dtype', self, ts, error)
+
+    def _cast(self, ts: Ts) -> Ts:
+        return ts.to(dtype=self.dtype)
+
     @property
     def dtype(self) -> torch.dtype:
         """
@@ -70,7 +93,12 @@ class DtypeMixIn(TensorAsDelegate):
 
 
 class TensorContainerMixIn(DeviceMixIn, DtypeMixIn):
-    pass
+    def _check_consistency(self, ts: Ts, error: bool = True) -> bool:
+        return (_check_consistency('device', self, ts, error) and
+                _check_consistency('dtype', self, ts, error))
+
+    def _cast(self, ts: Ts) -> Ts:
+        return ts.to(device=self.device, dtype=self.dtype)
 
 
 def _match_annotation(ba: inspect.BoundArguments, params) -> bool:

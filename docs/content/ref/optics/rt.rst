@@ -24,6 +24,14 @@ Optical surfaces
     Surface
     SurfaceList
 
+Apertures
+============================================
+.. autosummary::
+    :toctree: ../../generated/optics/rt/surf/aperture
+
+    Aperture
+    CircularAperture
+
 Specific surface types
 =================================
 .. autosummary::
@@ -31,6 +39,7 @@ Specific surface types
 
     Conic
     EvenAspherical
+    PlanarPhase
     Spherical
     Standard
 
