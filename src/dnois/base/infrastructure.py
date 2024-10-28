@@ -7,6 +7,8 @@ from .typing import Ts, Sequence, get_overloads, overload
 
 __all__ = [
     'broadcastable',
+    'debug',
+    'debugging',
     'get_bound_args',
 
     'DeviceMixIn',
@@ -15,6 +17,7 @@ __all__ = [
 ]
 
 _empty = inspect.Parameter.empty
+_debug = False
 
 
 def _check_consistency(attr: str, obj, ts: Ts, error: bool) -> bool:
@@ -26,6 +29,27 @@ def _check_consistency(attr: str, obj, ts: Ts, error: bool) -> bool:
         else:
             return False
     return True
+
+
+def debug(on: bool = True):
+    """
+    Switch :doc:`debugging mode </content/guide/debug>` on or off.
+
+    :param bool on: Enable debugging mode if ``True``, disable it otherwise. Default: ``True``.
+    :return: ``None``
+    """
+    global _debug
+    _debug = bool(on)
+
+
+def debugging() -> bool:
+    """
+    Returns whether debugging is enabled or not.
+
+    :return: Whether debugging is enabled or not.
+    :rtype: bool
+    """
+    return _debug
 
 
 class TensorAsDelegate:

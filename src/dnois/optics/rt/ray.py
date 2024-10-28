@@ -1,10 +1,11 @@
 import copy
+import functools
 import warnings
 
 import torch
 
 from ... import base
-from ...base.typing import Ts, Literal, Self, Callable
+from ...base.typing import Ts, Self, Sequence, Callable
 
 __all__ = [
     'BatchedRay',
@@ -83,6 +84,8 @@ class BatchedRay(base.TensorContainerMixIn):
     :param init_phase: Initial phase. A tensor of shape ``(...)``.
         Default: do not record phase.
     :type init_phase: float or Tensor
+    :param bool d_normalized: Whether ``direction`` is already normalized to length 1.
+        Default: ``False``.
     """
 
     __slots__ = ('_d_normed', '_o_modified', '_ts',)
@@ -94,6 +97,7 @@ class BatchedRay(base.TensorContainerMixIn):
         wl: float | Ts,
         init_opl: float | Ts = None,
         init_phase: float | Ts = None,
+        d_normalized: bool = False,
     ):
         if origin.size(-1) != 3 or direction.size(-1) != 3:
             raise ValueError(
@@ -108,7 +112,7 @@ class BatchedRay(base.TensorContainerMixIn):
         init_opl = _2tensor(init_opl, device, dtype)
         init_phase = _2tensor(init_phase, device, dtype)
         _check_shape_compatible(origin[..., 0], direction[..., 0], wl, init_opl, init_phase)
-        self._ts: dict[str, Ts] = {
+        self._ts: dict[str, Ts | None] = {
             'o': origin,
             'd': direction,
             'wl': wl,
@@ -116,7 +120,7 @@ class BatchedRay(base.TensorContainerMixIn):
             'opl': init_opl,
             'ph': init_phase,
         }
-        self._d_normed = False
+        self._d_normed = d_normalized
         self._o_modified = False
 
     def __repr__(self):
@@ -154,7 +158,7 @@ class BatchedRay(base.TensorContainerMixIn):
             new_ray._ts = new_ray._ts.copy()
         return new_ray
 
-    def discard_(self) -> Ts:
+    def discard_(self) -> Ts:  # TODO: add dims arg
         """
         Discard invalid rays. This method can be called only if the shape
         of rays (i.e. ``len(self.shape)``) is 1. :py:meth:`.flatten_`
@@ -232,11 +236,11 @@ class BatchedRay(base.TensorContainerMixIn):
         self._update_tensor(_copy)
         return self
 
-    def march(self, t: Ts, n: float | Ts = None) -> 'BatchedRay':
+    def march(self, t: float | Ts, n: float | Ts = None) -> 'BatchedRay':
         """Out-of-place version of :py:meth:`.march_`."""
         return self.clone().march_(t, n)
 
-    def march_(self, t: Ts, n: float | Ts = None) -> Self:
+    def march_(self, t: float | Ts, n: float | Ts = None) -> Self:
         """
         March forward by a distance ``t``. The origin will be updated.
 
@@ -247,6 +251,8 @@ class BatchedRay(base.TensorContainerMixIn):
         :type n: float or Tensor
         :return: self
         """
+        if not torch.is_tensor(t):
+            t = self.new_tensor(t)
         self.o = self._ts['o'] + self.d_norm * t.unsqueeze(-1)
         _opl, _ph = self.recording_opl, self.recording_phase
         if _opl or _ph:
@@ -259,11 +265,11 @@ class BatchedRay(base.TensorContainerMixIn):
                 self.phase = self.phase + base.wave_vec(self.wl) * opl
         return self
 
-    def march_to(self, z: Ts, n: float | Ts = None) -> 'BatchedRay':
+    def march_to(self, z: float | Ts, n: float | Ts = None) -> 'BatchedRay':
         """Out-of-place version of :py:meth:`.march_to_`."""
         return self.clone().march_to_(z, n)
 
-    def march_to_(self, z: Ts, n: float | Ts = None) -> Self:
+    def march_to_(self, z: float | Ts, n: float | Ts = None) -> Self:
         """
         March forward to a given z value ``z``. This is similar to :py:meth:`.march_`,
         but all the rays end up with identical z coordinate rather than marching distance.
@@ -275,8 +281,16 @@ class BatchedRay(base.TensorContainerMixIn):
         :type n: float or Tensor
         :return: self
         """
-        t = (z - self.z) / self.d_z
+        d_z = self.d_z if self._d_normed else self.d_norm[..., 2]
+        t = (z - self.z) / d_z
         return self.march_(t, n)
+
+    def norm_d(self) -> 'BatchedRay':
+        """
+        Out-of-place version of :py:meth:`.norm_d_`. Returns ``self`` if the direction
+        is already normalized, otherwise a new object.
+        """
+        return self if self._d_normed else self.clone().norm_d_()
 
     def norm_d_(self) -> Self:
         """
@@ -313,29 +327,31 @@ class BatchedRay(base.TensorContainerMixIn):
         self._update_tensor(_to)
         return self
 
-    def update_valid(self, valid: Ts, action: Literal['discard', 'copy'] = None) -> Self:
+    def update_valid(self, valid: Ts) -> Self:
         """Out-of-place version of :meth:`.update_valid`."""
-        return self.clone().update_valid_(valid, action)
+        return self.clone().update_valid_(valid)
 
-    def update_valid_(self, valid: Ts, action: Literal['discard', 'copy'] = None) -> Self:
+    def update_valid_(self, valid: Ts) -> Self:
         """
         Update the validity flags with ``valid``. The new validity flag will be
         its logical ``&`` with the old.
 
         :param Tensor valid: Another validity flag.
-        :param str action: The action to take after updating validity flags.
-            Call :py:meth:`.discard_` if ``'discard'``, or :py:meth:`.copy_valid_`
-            if ``'copy'``, or nothing if ``None``. Default: ``None``.
         :return: self
         """
         if valid.dtype != torch.bool:
             raise TypeError('Only bool tensors are supported.')
         self.valid = torch.logical_and(self._ts['v'], valid)
-        if action == 'discard':
-            self.discard_()
-        elif action == 'copy':
-            self.copy_valid_()
         return self
+
+    def valid_percentage(self, dims: int | Sequence[int] = None) -> Ts:
+        v = self.valid.broadcast_to(self.shape)
+        if dims is None:
+            dims = list(range(v.ndim))
+        if isinstance(dims, int):
+            dims = [dims]
+        total = functools.reduce(lambda x, y: x * y, [v.size(dim) for dim in dims])
+        return v.sum(dims, False) / total
 
     @property
     def shape(self) -> torch.Size:
@@ -448,8 +464,11 @@ class BatchedRay(base.TensorContainerMixIn):
 
     @opl.setter
     def opl(self, value: Ts):
-        self._check_shape(value.shape, 'OPL')
-        self._ts['opl'] = self._cast(value)
+        if value is None:
+            self._ts['opl'] = None
+        else:
+            self._check_shape(value.shape, 'OPL')
+            self._ts['opl'] = self._cast(value)
 
     @property
     def phase(self) -> Ts | None:
@@ -467,11 +486,14 @@ class BatchedRay(base.TensorContainerMixIn):
 
     @phase.setter
     def phase(self, value: Ts):
-        self._check_shape(value.shape, 'phase')
-        value = self._cast(value)
-        if value.lt(0).any() or value.gt(2 * torch.pi).any():
-            value = value.remainder(2 * torch.pi)
-        self._ts['ph'] = value
+        if value is None:
+            self._ts['phase'] = None
+        else:
+            self._check_shape(value.shape, 'phase')
+            value = self._cast(value)
+            if value.lt(0).any() or value.gt(2 * torch.pi).any():
+                value = value.remainder(2 * torch.pi)
+            self._ts['ph'] = value
 
     @property
     def with_wl(self) -> bool:

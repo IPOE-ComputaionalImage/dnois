@@ -1,6 +1,9 @@
 # ide directory
 .idea/
 
+# for development
+.tmp/
+
 # built artifacts, no matter code or doc
 dist/
 docs/_build/

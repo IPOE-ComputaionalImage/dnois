@@ -442,13 +442,13 @@ def get(name: str, default_none: bool = False) -> Union[Material, None]:
     return m
 
 
-def register(name: str, material: Material):
+def register(material: Material):
     """
     Add a new class of material into material library.
 
-    :param str name: Name of the material.
     :param Material material: The material instance.
     """
+    name = material.name
     if name in _lib:
         raise KeyError(f'Material {name} already exists.')
     _lib[name] = material

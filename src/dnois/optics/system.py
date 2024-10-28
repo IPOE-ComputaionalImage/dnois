@@ -2,13 +2,14 @@ import abc
 import math
 import warnings
 
+from omegaconf import DictConfig, OmegaConf
 import torch
 from torch import nn
 
 from .. import scene as _sc
 from ..base import FRAUNHOFER_LINES, ShapeError, TensorContainerMixIn
 from ..base.typing import (
-    Ts, Size2d, FovSeg, Vector, SclOrVec, Callable, Any,
+    Ts, Size2d, FovSeg, Vector, SclOrVec, Callable, Sequence,
     size2d, vector, cast, scl_or_vec
 )
 
@@ -54,7 +55,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         #: Height and width of a pixel in meters.
         self.pixel_size: tuple[float, float] = pixel_size
         #: Focal length of the reference model.
-        self.nominal_focal_length: float | None = nominal_focal_length
+        self.nominal_focal_length: float | None = nominal_focal_length  # TODO: modify
 
     @property
     @abc.abstractmethod
@@ -129,6 +130,7 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
         wavelength: Vector = None,
         fov_segments: FovSeg | Size2d = 'paraxial',
         depth: SclOrVec | tuple[Ts, Ts] = None,
+        # rendering_config: DictConfig = None,
         depth_aware: bool = False,
         polarized: bool = False,
         coherent: bool = False,
@@ -165,11 +167,12 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
     @abc.abstractmethod
     def psf_on_grid(
         self,
-        wavelength: Vector = None,
-        fov_segments: FovSeg | Size2d = None,
-        depth: Vector = None,
-        polarized: bool = False,
-    ) -> Ts:  # X x Y x D x P x C x H x W
+        grid_size:Size2d,
+        grid_spacing: float|tuple[float, float],
+        depth: Vector,
+        fov: Sequence[tuple[float, float]],
+        wl: Vector = None,
+    ) -> Ts:  # N_fov x N_D x N_wl x H x W
         pass
 
     @abc.abstractmethod
@@ -200,11 +203,9 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
             return self.patchwise_render(scene, cast(tuple[int, int], self.fov_segments), **kwargs)
 
     def pointwise_render(self, scene: _sc.ImageScene, **kwargs) -> Ts:
-        self._check_scene(scene)
         raise NotImplementedError()
 
     def patchwise_render(self, scene: _sc.ImageScene, segments: tuple[int, int], **kwargs) -> Ts:
-        self._check_scene(scene)
         raise NotImplementedError()
 
     def conv_render(self, scene: _sc.ImageScene, **kwargs) -> Ts:
@@ -266,7 +267,7 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
                 t = d1 * t / (d2 - (d2 - d1) * t)  # default sampling curve
             return d1 + (d2 - d1) * t
         elif sampling_curve is not None or n is not None:
-            warnings.warn(f'sampling_curve and n are ignored because self.depth is a tensor')
+            warnings.warn(f'sampling_curve and n are ignored because depth is already specified')
         if self.depth.ndim == 0:  # fixed depth
             return depth.reshape(1)
         else:  # a sequence of depths
@@ -315,6 +316,11 @@ class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMet
                     raise ShapeError(f'probabilities must be a 1D tensor')
                 idx = torch.multinomial(probabilities, 1).squeeze().item()
             return depth[idx]
+
+    # @classmethod
+    # def create_rendering_config(cls, preset: DictConfig = None) -> DictConfig:
+    #     cfg=OmegaConf.create() if preset is None else preset
+    #     cfg.setdefault('fov_segments', 'paraxial')
 
     def _delegate(self) -> Ts:
         return self.wavelength

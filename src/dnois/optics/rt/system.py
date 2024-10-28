@@ -5,22 +5,23 @@ import warnings
 import matplotlib.pyplot as plt
 import torch
 
-from ... import scene as _sc, base
+from . import surf
+from .ray import BatchedRay
+from ..system import RenderingOptics, Pinhole
+from ... import scene as _sc, base, utils
 from ...base import typing
 from ...base.typing import (
-    Ts, Any, IO, Size2d, Vector, FovSeg, SclOrVec, SurfSample, Scalar, Self,
+    Ts, Any, IO, Size2d, Vector, FovSeg, SclOrVec, SurfSample, Scalar, Self, Sequence,
     scalar, size2d
 )
-from ...utils import wl2rgb, t4plot
-from ..system import RenderingOptics, Pinhole
-from .ray import BatchedRay
-from .surf import build_surface, SurfaceList, Surface, CircularSurface
 
 __all__ = [
     'SequentialRayTracing',
 ]
 
-DEFAULT_SPP: int = 256
+DEFAULT_PRE_SAMPLES: int = 101
+DEFAULT_SAMPLES: int = 201
+FOV_THRESHOLD4CHIEF_RAY = math.radians(0.01)
 
 
 def _check_arg(arg: Any, n1: str, n2: str):
@@ -41,14 +42,27 @@ def _plot_fov_alphas(n: int) -> list[float]:
 
 
 def _plot_rays_3d(ax: plt.Axes, start: Ts, end: Ts, valid: Ts, colors: list[str], alphas: list[float]):
-    # shape: N_wl x N_fov x N_spp x 3
-    for clr, wl_slc1, wl_slc2, v in zip(colors, start, end, valid):  # N_fov x N_spp x 3
-        for alpha, fov_slc1, fov_slc2, vv in zip(alphas, wl_slc1, wl_slc2, v):  # N_spp x 3
+    # shape: N_fov x N_wl x N_spp x 3
+    for alpha, fov_slc1, fov_slc2, v in zip(alphas, start, end, valid):  # N_wl x N_spp x 3
+        for clr, wl_slc1, wl_slc2, vv in zip(colors, fov_slc1, fov_slc2, v):  # N_spp x 3
             ax.plot(
-                (t4plot(fov_slc1[..., 2][vv]), t4plot(fov_slc2[..., 2][vv])),
-                (t4plot(fov_slc1[..., 1][vv]), t4plot(fov_slc2[..., 1][vv])),
+                (utils.t4plot(wl_slc1[:, 2][vv]), utils.t4plot(wl_slc2[:, 2][vv])),
+                (utils.t4plot(wl_slc1[:, 1][vv]), utils.t4plot(wl_slc2[:, 1][vv])),
                 color=clr, alpha=alpha, linewidth=0.5
             )
+
+
+def _get_fov(fov: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    if len(fov) <= 0:
+        raise ValueError(f'No FoV value given')
+    for i, fov_item in enumerate(fov):
+        if len(fov_item) != 2:
+            raise ValueError(f'Each element in fov must be a pair of floats, got {fov_item} as item {i}')
+        if not all(-torch.pi / 2 < angle < torch.pi / 2 for angle in fov_item):
+            raise ValueError(f'Invalid FoV (index {i}): {fov_item}')
+        if fov_item[0] ** 2 + fov_item[1] ** 2 < FOV_THRESHOLD4CHIEF_RAY ** 2:
+            raise NotImplementedError(f'FoV too small (index {i}): {fov_item}, intractable currently')
+    return list(fov)
 
 
 class SequentialRayTracing(RenderingOptics):
@@ -56,12 +70,12 @@ class SequentialRayTracing(RenderingOptics):
     A class of sequential and ray-tracing-based optical system model.
     See :class:`~dnois.optics.RenderingOptics` for descriptions of more parameters.
 
-    :param SurfaceList surfaces: Optical surfaces.
-    :param samples_per_point: Number of sampling rays for each object point.
+    :param ``SurfaceList`` surfaces: Optical surfaces.
+    :param sampling_arg: Number of sampling rays for each object point.
         See :meth:`CircularSurface.sample` for more details. Default: 256.
-    :type samples_per_point: int or tuple[int, int]
+    :type sampling_arg: int or tuple[int, int]
     :param str sampling_mode: Mode for sampling rays.
-        See :meth:`CircularSurface.sample` for more details. Default: ``random``.
+        See :meth:`~dnois.optics.Aperture.sample` for more details. Default: ``random``.
     :param bool final_superposition_coherent: Whether to use coherent superposition
         to compute final PSF. If ``True``, use the algorithm in
         *"Chen, S., Feng, H., Pan, D., Xu, Z., Li, Q., & Chen, Y. (2021).
@@ -75,7 +89,7 @@ class SequentialRayTracing(RenderingOptics):
 
     def __init__(
         self,
-        surfaces: SurfaceList,
+        surfaces: surf.SurfaceList,
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
         nominal_focal_length: float = None,
@@ -85,7 +99,7 @@ class SequentialRayTracing(RenderingOptics):
         depth_aware: bool = False,
         polarized: bool = False,
         coherent: bool = False,
-        samples_per_point: int | tuple[int, int] = 256,
+        sampling_arg: int | tuple[int, int] = 256,
         sampling_mode: SurfSample = 'random',
         final_superposition_coherent: bool = None,
         psf_size: Size2d = None,
@@ -98,51 +112,95 @@ class SequentialRayTracing(RenderingOptics):
             final_superposition_coherent = coherent
         if self.coherent and not final_superposition_coherent:
             raise ValueError(f'final_superposition_coherent must be True when coherent is True')
-        if isinstance(samples_per_point, int) and sampling_mode in ('rectangular', 'circular'):
-            raise TypeError(f'A pair of int expected for samples_per_point when sampling_mode '
-                            f'is {sampling_mode}, got {samples_per_point}')
-        elif isinstance(samples_per_point, tuple) and sampling_mode == 'random':
-            raise TypeError(f'A single int expected for samples_per_point when sampling_mode is '
-                            f'random, got {samples_per_point}')
         if psf_size is None:
             raise NotImplementedError()
-        self.surfaces: SurfaceList = surfaces  #: Surface list.
+        self.surfaces: surf.SurfaceList = surfaces  #: Surface list.
         #: Number of sampling rays when computing a PSF.
-        #: See :meth:`CircularSurface.sample` for more details.
-        self.samples_per_point: int | tuple[int, int] = samples_per_point
+        self.sampling_arg: int | tuple[int, int] = sampling_arg
         #: Mode for sampling on a surface.
         #: See :meth:`CircularSurface.sample` for more details.
         self.sampling_mode: SurfSample = sampling_mode
         #: Whether to use coherent superposition to compute final PSF. See above descriptions.
         self.final_superposition_coherent: bool = final_superposition_coherent
-        self.psf_size: tuple[int, int] = size2d(psf_size)  #: Height and width of evaluated PSF.
+        self.psf_size: tuple[int, int] = size2d(psf_size)  #: Height and width of evaluated PSF in pixels.
 
+    # This method is adapted from
+    # https://github.com/TanGeeGo/ImagingSimulation/blob/master/PSF_generation/ray_tracing/difftrace/analysis.py
     def psf_on_grid(
         self,
-        wavelength: Vector = None,
-        fov_segments: FovSeg | Size2d = None,
-        depths: Vector | int = None,
-        polarized: bool = False
-    ) -> Ts:
-        raise NotImplementedError()
+        grid_size: Size2d,
+        grid_spacing: float | tuple[float, float],
+        depth: Vector,
+        fov: Sequence[tuple[float, float]],
+        wl: Vector = None,
+    ) -> tuple[BatchedRay, Ts]:  # N_fov x N_D x N_wl x H x W
+        grid_size = size2d(grid_size)
+        grid_spacing = typing.pair(grid_spacing)
+        wl = self._get_wl(wl)  # N_wl
+        z = self.depth2z(typing.vector(depth))  # N_D
+        fov = self.new_tensor(_get_fov(fov))  # N_fov x 2
 
-    def psf_on_points(self, points: Ts, wl: Vector = None, polarized: bool = False) -> Ts:
+        ray, chief_ray = self._generate_rays(fov, z, wl.unsqueeze(-1))  # N_fov x N_d x N_wl x N_spp(1)
+
+        ray = self._obj2img(ray).norm_d_()
+        chief_ray = self._obj2img(chief_ray).norm_d_()
+        radial_offset = torch.sqrt(chief_ray.o[..., :2].square().sum(-1))
+        d_proj = torch.sqrt(chief_ray.d[..., :2].square().sum(-1))
+        rs_roc = radial_offset / d_proj  # N_fov x N_d x N_wl x 1
+
+        shift = ray.o[..., :2] - chief_ray.o[..., :2]
+        dp = torch.sum(shift * ray.d[..., :2], dim=-1)  # dot product
+        # N_fov x N_D x N_wl x N_spp
+        length2rs = dp + torch.sqrt(dp.square() - shift.square().sum(-1) + rs_roc.square())
+        ref_idx = self.surfaces.mt_tail.n(ray.wl)
+        ray = ray.march_(-length2rs, ref_idx)
+
+        lim = ((grid_size[0] - 1) // 2, (grid_size[1] - 1) // 2)
+        y, x = [torch.linspace(
+            -lim[i], lim[i], grid_size[i], device=self.device, dtype=self.dtype
+        ) * grid_spacing[i] for i in range(2)]
+        x, y = torch.meshgrid(x, y, indexing='xy')  # H x W
+        # N_fov x N_d x N_wl x H x W x 3
+        relative_position = chief_ray.o.unsqueeze(-2) + torch.stack([x, y, torch.zeros_like(x)], -1)
+        r = relative_position.unsqueeze(-2) - ray.o[..., None, None, :, :]
+        r_unit = base.normalize(r)  # N_fov x N_D x N_wl x H x W x N_spp x 3
+        rs_normal = ray.o - chief_ray.o
+        rs_normal = base.normalize(rs_normal)  # N_fov x N_D x N_wl x N_spp x 3
+        cosine_prop = torch.sum(rs_normal[..., None, None, :, :] * r_unit, -1)
+        cosine_rs = torch.sum(rs_normal * ray.d, -1)  # N_fov x N_D x N_wl x N_spp
+        obliquity = (cosine_rs[..., None, None, :] + cosine_prop) / 2
+        r_proj = torch.sum(ray.d[..., None, None, :, :] * r, -1)
+        wave_vec = base.wave_vec(wl.reshape(-1, 1, 1, 1))
+        field = torch.polar(obliquity, (r_proj + ray.opl[..., None, None, :]) * wave_vec)
+        field = field.sum(-1)  # N_fov x N_D x N_wl x H x W
+        psf = base.abs2(field)
+        return psf / psf.sum((-2, -1), True)  # N_fov x N_D x N_wl x H x W
+
+    def psf_on_points(
+        self,
+        points: Ts,
+        wl: Vector = None,
+        polarized: bool = False,
+        coherent_superposition: bool = False
+    ) -> Ts:
         if polarized:
-            raise NotImplementedError()
+            raise ValueError(f'Polarization-aware PSF calculation '
+                             f'is not available for {self.__class__.__name__}')
         if points.ndim < 1 or points.size(-1) != 3:
             raise base.ShapeError(f'Size of last dimension of points must be 3, '
                                   f'but its shape is {points.shape}')
-        wl = self._get_wl(wl)
+        if points.isinf().any():
+            raise ValueError(f'Coordinates of sources cannot be infinite')
+        wl = self._get_wl(wl)  # N_wl
 
-        o = points.unsqueeze(-2).unsqueeze(-2)  # ... 1 x 1 x 3
-        x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
-        points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1)  # N_spp x 3
-        d = points.unsqueeze(-2) - o.unsqueeze(-2)  # ... x N_spp x 1 x 3
-        ray = BatchedRay(o, d, wl.unsqueeze(-1))  # ... x N_spp x N_wl
+        o = points.unsqueeze(-2)  # ... 1 x 1 x 3
+        points = self.surfaces.first.sample(self.sampling_mode, self.sampling_arg)  # N_spp x 3
+        d = points.unsqueeze(-3) - o  # ... x 1 x N_spp x 3
+        ray = BatchedRay(o, d, wl.unsqueeze(-1))  # ... x N_wl x N_spp
         ray.norm_d_()
 
-        out_ray = self.surfaces(ray)
-        if self.final_superposition_coherent:
+        out_ray = self._obj2img(ray)
+        if coherent_superposition:
             return self._final_ray2psf_coherent(out_ray)
         else:
             return self._final_ray2psf_incoherent(out_ray)
@@ -150,14 +208,20 @@ class SequentialRayTracing(RenderingOptics):
     def pointwise_render(
         self,
         scene: _sc.ImageScene,
+        wavelength: Vector = None,
+        sampling_arg: int | tuple[int, int] = None,  # TODO
         vignette: bool = True,
     ) -> Ts:
+        """subject to change"""
+        if sampling_arg is None:
+            sampling_arg = self.sampling_arg
+        wl = self._get_wl(wavelength)
         self._check_scene(scene)
         if self.polarized or scene.n_plr != 0:
-            raise NotImplementedError()
+            raise ValueError(f'Polarization-aware rendering is not available for {self.__class__.__name__}')
         if scene.intrinsic is not None:
             raise NotImplementedError()
-        if self.wavelength.numel() != scene.n_wl:
+        if wl.numel() != scene.n_wl:
             raise ValueError(f'A scene with {self.wavelength.numel()} wavelengths expected, '
                              f'got {scene.n_wl}')
         if len(self.surfaces) == 0:
@@ -178,20 +242,20 @@ class SequentialRayTracing(RenderingOptics):
         if depth is None:
             depth = torch.stack([self.sample_depth() for _ in range(n_b)])
             depth = depth.reshape(-1, 1, 1).expand(-1, n_h, n_w)
-        depth = depth.clamp(0, self.optical_infinity)
+        z = self._restrict_in_obj(self.depth2z(depth))
+        depth = self.z2depth(z)
         x = torch.linspace(1, -1, n_w, device=device).unsqueeze(0)  # from right to left
         x = x * math.tan(rm.fov_half_x) * depth
         y = torch.linspace(1, -1, n_h, device=device).unsqueeze(-1)  # from top to bottom
         y = y * math.tan(rm.fov_half_y) * depth
-        o = torch.stack([x, y, self.depth2z(depth)], -1)  # B x H x W x 3
+        o = torch.stack([x, y, z], -1)  # B x H x W x 3
 
-        x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
-        spp = x0.numel()
-        points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1)  # N_spp x 3
+        points = self.surfaces.first.sample(self.sampling_mode, sampling_arg)  # N_spp x 3
+        spp = points.size(0)
         o = o.unsqueeze(-2).unsqueeze(-5)
         d = points - o  # B x 1 x H x W x N_spp x 3
 
-        wl = self.wavelength.view(1, -1, 1, 1, 1)
+        wl = wl.view(1, -1, 1, 1, 1)
         ray = BatchedRay(o, d, wl)  # B x N_wl x H x W x N_spp
         ray.to_(device=device)
         ray.norm_d_()
@@ -230,6 +294,9 @@ class SequentialRayTracing(RenderingOptics):
         """
         Converts depth to z-coordinate in lens system.
 
+        .. seealso::
+            This is the inverse of :meth:`.z2depth`.
+
         :param depth: Depth.
         :type depth: float | Tensor
         :return: Z-coordinate in lens system.
@@ -244,14 +311,9 @@ class SequentialRayTracing(RenderingOptics):
     def focus_to_(self, depth: Scalar) -> Self:
         """This method is subject to change."""
         depth = scalar(depth).to(self.device)
-        z = self.depth2z(depth)
-        z = z.clamp(-self.optical_infinity, 0)
+        z = self._restrict_in_obj(self.depth2z(depth))
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
-
-        x0, y0 = self.surfaces[0].sample(self.samples_per_point, self.sampling_mode)
-        points = torch.stack([x0, y0, torch.zeros_like(x0)], dim=-1).to(o)  # N_spp x 3
-        d = points - o  # N_spp x 3
-
+        d = self.surfaces.first.sample(self.sampling_mode, self.sampling_arg) - o  # N_spp x 3
         wl = self.wavelength.reshape(-1, 1)
         ray = BatchedRay(o, d, wl)  # N_wl x N_spp
         ray.norm_d_()
@@ -264,7 +326,7 @@ class SequentialRayTracing(RenderingOptics):
         new_z = out_ray.z + t * out_ray.d_z
         new_z = new_z[out_ray.valid & new_z.isnan().logical_not()].mean()
         move = new_z - self.surfaces.total_length
-        self.surfaces[-1].distance += move
+        self.surfaces.last.distance += move
 
         return self
 
@@ -281,76 +343,76 @@ class SequentialRayTracing(RenderingOptics):
             fov = [0., fov_half * 0.5 ** 0.5, fov_half]
         if wl is None:
             wl = self.wavelength
-        fov = typing.vector(fov, device=self.device)
-        wl = typing.vector(wl, device=self.device)
+        fov = typing.vector(fov, device=self.device, dtype=self.dtype)
+        wl = typing.vector(wl, device=self.device, dtype=self.dtype)
 
         fig, ax = plt.subplots(figsize=(12.8, 9.6), subplot_kw={'frameon': False})
 
-        uppers = []
-        lowers = []
-        for sf in self.surfaces:  # surfaces
-            sf: Surface
-            y = torch.linspace(-sf.radius, sf.radius, 100, device=self.device)
-            z = sf.h_extended(torch.zeros_like(y), y) + sf.context.z
-            ax.plot(t4plot(z), t4plot(y), color='black', linewidth=1)
-            uppers.append((z[-1].item(), y[-1].item()))
-            lowers.append((z[0].item(), y[0].item()))
-        for i in range(len(self.surfaces) - 1):  # edges
-            if self.surfaces[i].material.name == 'vacuum':
-                continue
-            ax.plot(*list(zip(uppers[i], uppers[i + 1])), color='black', linewidth=1)
-            ax.plot(*list(zip(lowers[i], lowers[i + 1])), color='black', linewidth=1)
-        # sensor
+        self._plot_components(ax)
+        # image_plane
         diag_length = (self.sensor_size[0] ** 2 + self.sensor_size[1] ** 2) ** 0.5
         y = torch.linspace(-diag_length / 2, diag_length / 2, 100, device=self.device)
         ax.plot(
-            t4plot(torch.full_like(y, self.surfaces.total_length)), t4plot(y),
+            utils.t4plot(torch.full_like(y, self.surfaces.total_length.item())), utils.t4plot(y),
             color='black', linewidth=2
         )
         # rays
-        total_length = self.surfaces.total_length.item()
-        sf1 = self.surfaces[0]
-        o_y = torch.linspace(-sf1.radius * 0.98, sf1.radius * 0.98, spp, device=self.device)
-        o = torch.stack([torch.zeros_like(o_y), o_y, torch.zeros_like(o_y)], -1)  # N_spp x 3
+        o = self.surfaces[0].sample('diameter', spp, torch.pi / 2)  # N_spp x 3
         d = torch.stack([torch.zeros_like(fov), fov.tan(), torch.ones_like(fov)], dim=-1)
-        d = d.unsqueeze(1)  # N_fov x 1 x 3
-        ray = BatchedRay(o, d, wl.reshape(-1, 1, 1))  # N_wl x N_fov x N_spp
-        ray.norm_d_().broadcast_()
-        colors = [wl2rgb(_wl, output_format='hex') for _wl in wl.tolist()]
-        alphas = _plot_fov_alphas(fov.numel())
-        for sf in self.surfaces:
-            out_ray = sf(ray)
-            _plot_rays_3d(ax, ray.o, out_ray.o, out_ray.valid, colors, alphas)
-            ray = out_ray
-        out_ray = ray.march_to(total_length)
-        _plot_rays_3d(ax, ray.o, out_ray.o, out_ray.valid, colors, alphas)
+        d = d.unsqueeze(1).unsqueeze(1)  # N_fov x 1 x 1 x 3
+        ray = BatchedRay(o, d, wl.reshape(1, -1, 1))  # N_fov x N_wl x N_spp
+        self._plot_rays(ax, ray, fov, wl)
 
-        _plot_set_ax(ax, total_length)
+        _plot_set_ax(ax, self.surfaces.total_length.item())
         return fig
 
     @torch.no_grad()
     def plot_spot_diagram(self) -> plt.Figure:
-        """This method is subject to change."""
-        if self.sampling_mode != 'unipolar':
-            raise NotImplementedError()
+        raise NotImplementedError()
 
-        fig, ax = plt.subplots(3, 1)
+    # This method is adapted from
+    # https://github.com/TanGeeGo/ImagingSimulation/blob/master/PSF_generation/ray_tracing/difftrace/analysis.py
+    def wavefront_map(
+        self,
+        depth: Vector,
+        fov: Sequence[tuple[float, float]],
+        wl: Vector = None,
+    ) -> tuple[BatchedRay, Ts]:  # N_fov x N_D x N_wl x H x W
+        wl = self._get_wl(wl)  # N_wl
+        z = self.depth2z(typing.vector(depth))  # N_D
+        fov = self.new_tensor(_get_fov(fov))  # N_fov x 2
 
-        sf1 = self.surfaces[0]
-        if not isinstance(sf1, CircularSurface):
-            raise NotImplementedError()
-        x, y = sf1.sample(self.samples_per_point, self.sampling_mode)
-        o = torch.stack([x, y, torch.zeros_like(y)], -1)  # N_spp x 3
+        ray, chief_ray = self._generate_rays(fov, z, wl.unsqueeze(-1))  # N_fov x N_d x N_wl x N_spp(1)
 
-        fov_half = self.reference.fov_half
-        fov = torch.tensor([0., fov_half * 0.5 ** 0.5, fov_half], device=self.device)
-        d = torch.stack([torch.zeros_like(fov), fov.tan(), torch.ones_like(fov)], dim=-1)
-        d = d.unsqueeze(1)  # N_fov x 1 x 3
-        ray = BatchedRay(o, d, ...)
+        ray = self._obj2img(ray)
+        chief_ray = self._obj2img(chief_ray)
+        radial_offset = torch.sqrt(chief_ray.o[..., :2].square().sum(-1))
+        d_proj = torch.sqrt(chief_ray.d[..., :2].square().sum(-1))
+        rs_roc = radial_offset / d_proj  # N_fov x N_d x N_wl x 1
 
-        # TODO: complete
+        shift = ray.o[..., :2] - chief_ray.o[..., :2]
+        dp = torch.sum(shift * ray.d[..., :2], dim=-1)  # dot product
+        length2rs = dp + torch.sqrt(dp.square() - shift.square().sum(-1) + rs_roc.square())
+        ref_idx = self.surfaces.mt_tail.n(ray.wl)
+        opd = chief_ray.march_(-rs_roc, ref_idx).opl - ray.march_(-length2rs, ref_idx).opl
+        return ray, opd / wl.unsqueeze(-1)  # N_fov x N_d x N_wl x N_spp
 
-        return fig
+    def z2depth(self, z: float | Ts) -> Ts:
+        """
+        Converts z-coordinate in lens system to depth.
+
+        .. seealso::
+            This is the inverse of :meth:`.depth2z`.
+
+        :param z: Z-coordinate in lens system.
+        :type z: float | Tensor
+        :return: Depth.
+        :rtype: Tensor
+        """
+        # TODO: currently depth=0 plane is assumed to be z=0 plane, which is incorrect
+        if not torch.is_tensor(z):
+            z = torch.tensor(z, device=self.device, dtype=self.dtype)
+        return -z
 
     @property
     def reference(self) -> Pinhole:
@@ -420,7 +482,7 @@ class SequentialRayTracing(RenderingOptics):
     @classmethod
     def from_pyds(cls, info: dict[str, Any]) -> 'SequentialRayTracing':
         # surfaces
-        sl = SurfaceList([build_surface(cfg) for cfg in info['surfaces']], info['environment_material'])
+        sl = surf.SurfaceList([surf.build_surface(cfg) for cfg in info['surfaces']], info['environment_material'])
 
         # sensor
         sensor_cfg = info['sensor']
@@ -443,19 +505,132 @@ class SequentialRayTracing(RenderingOptics):
             _set('depth_aware')
             _set('polarized')
             _set('coherent')
-            _set('samples_per_point')
-            _set('sampling_mode')
+            _set('sampling_arg')
         return SequentialRayTracing(sl, pixel_num, pixel_size, **kwargs)
 
     # protected
     # ========================
+    def _restrict_in_obj(self, z: Ts, warn: bool = False) -> Ts:
+        if z.gt(0).any() or z.lt(-self.optical_infinity).any():
+            if warn:
+                warnings.warn(f'z-coordinate exceeding valid region, clamped to [-{self.optical_infinity}, 0]')
+            z = z.clamp(-self.optical_infinity, 0)
+        return z
 
     def _obj2img(self, ray: BatchedRay) -> BatchedRay:
         out_ray: BatchedRay = self.surfaces(ray)
-        return out_ray.march_to_(self.surfaces.total_length)
+        ref_idx = self.surfaces.last.material.n(out_ray.wl, 'm')
+        return out_ray.march_to_(self.surfaces.total_length, ref_idx)
 
     def _final_ray2psf_coherent(self, ray: BatchedRay) -> Ts:
         raise NotImplementedError()
 
     def _final_ray2psf_incoherent(self, ray: BatchedRay) -> Ts:
         raise NotImplementedError()
+
+    # This method is adapted from
+    # https://github.com/TanGeeGo/ImagingSimulation/blob/master/PSF_generation/ray_tracing/difftrace/analysis.py
+    def _generate_rays(
+        self, fov: Ts, z: Ts, wl: Ts, pre_samples: int = DEFAULT_PRE_SAMPLES, samples: int = DEFAULT_SAMPLES
+    ) -> tuple[BatchedRay, BatchedRay]:
+        if not isinstance(self.surfaces.first.aperture, surf.CircularAperture):
+            raise NotImplementedError()
+
+        xy = fov.tan().unsqueeze(-2) * z.unsqueeze(-1)  # N_fov x N_D x 2
+        origin = torch.cat([xy, z.reshape(1, -1, 1).expand(xy.size(0), -1, -1)], dim=-1)  # N_fov x N_D x 3
+        origin = origin.unsqueeze(-2).unsqueeze(-3)  # N_fov x N_D x 1 x 1 x 3
+        d_parallel = torch.stack([fov[:, 0].tan(), fov[:, 1].tan(), fov.new_ones(fov.size(0))], -1)
+        d_parallel = d_parallel / d_parallel.norm(2, -1, True)
+        d_parallel = d_parallel.view(-1, 1, 1, 1, 3)  # -1 <=> N_fov
+
+        def _make_d(_points: Ts) -> tuple[Ts, Ts]:
+            _d = _points - origin
+            _length = _d.norm(2, -1)
+            _d = _d / _length.unsqueeze(-1)
+            if z.isinf().any():
+                _d = torch.where(z.isinf().reshape(-1, 1, 1, 1), d_parallel, _d)
+            return _d, _length
+
+        r = self.surfaces.first.aperture.radius
+        edge_h = self.surfaces.first.h_extended(torch.zeros_like(r), r)
+        r = r + torch.sqrt(d_parallel[..., 2].reciprocal().square() - 1) * edge_h  # N_fov x 1 x 1 x 1
+        x, y = torch.meshgrid(
+            torch.linspace(-1, 1, pre_samples, device=self.device, dtype=self.dtype),
+            torch.linspace(-1, 1, pre_samples, device=self.device, dtype=self.dtype),
+            indexing='ij'
+        )
+        x, y = x.flatten(), y.flatten()
+        points_pre = torch.stack([x, y, torch.zeros_like(x)], dim=-1)  # N_spp x 3
+        points_pre = points_pre * r.unsqueeze(-1)  # N_fov x 1 x 1 x N_spp x 3
+        ray = BatchedRay(points_pre, d_parallel, wl, d_normalized=True)
+        out_ray = self.surfaces(ray)
+
+        valid = out_ray.valid.broadcast_to(out_ray.shape)  # N_fov x N_D x N_wl x N_spp
+        xy_valid = ray.o[..., :2].masked_fill(~valid.unsqueeze(-1), float('nan'))
+        xy_mean = xy_valid.nanmean(-2, True)  # N_fov x N_D x N_wl x 1 x 2
+        points_chief = torch.cat([xy_mean, torch.zeros_like(xy_mean[..., [0]])], -1)
+        d_chief, l0_chief = _make_d(points_chief)  # N_fov x N_D x N_wl x 1( x 3)
+        chief_ray = BatchedRay(points_chief, d_chief, wl, 0., d_normalized=True)  # N_fov x N_D x N_wl x 1
+
+        # mimicking np.nanmax and np.nanmin
+        xy_min = xy_valid.nan_to_num(nan=float('inf')).amin(-2, True)
+        xy_max = xy_valid.nan_to_num(nan=-float('inf')).amax(-2, True)
+        xy_shift_min = torch.abs(xy_min - xy_mean).unsqueeze(-2)  # N_fov x N_D x N_wl x 1 x 1 x 2
+        xy_shift_max = torch.abs(xy_max - xy_mean).unsqueeze(-2)  # N_fov x N_D x N_wl x 1 x 1 x 2
+
+        h_p = torch.linspace(-1, 1, samples, dtype=self.dtype, device=self.device)
+        h_p, w_p = torch.meshgrid(-h_p, h_p.clone(), indexing='ij')
+        theta = torch.arctan2(h_p, w_p)
+        o_p = torch.stack((theta.cos(), theta.sin()), dim=-1)
+        o_p *= torch.max(h_p.abs(), w_p.abs()).unsqueeze(-1)  # N_spp' x N_spp' x 2
+
+        o_shape = xy_valid.shape[:3] + (samples, samples, 3)
+        o = torch.zeros(o_shape, dtype=self.dtype, device=self.device)
+        o[..., :samples // 2, :, 1] = o_p[:samples // 2, :, 1] * xy_shift_max[..., 1]
+        o[..., samples // 2:, :, 1] = o_p[samples // 2:, :, 1] * xy_shift_min[..., 1]
+        o[..., :, :samples // 2, 0] = o_p[:, :samples // 2, 0] * xy_shift_max[..., 0]
+        o[..., :, samples // 2:, 0] = o_p[:, samples // 2:, 0] * xy_shift_min[..., 0]
+        o[..., :2] += xy_mean.unsqueeze(-2)
+        points_sample = o.flatten(-3, -2)
+        d_sample, l0 = _make_d(points_sample)  # N_fov x N_D x N_wl x N_spp'( x 3)
+        # to reduce magnitude of opl and subsequently floating point error
+        l0 = l0 - l0_chief
+        if z.isinf().any():
+            l0 = torch.where(
+                z.isinf().reshape(-1, 1, 1),
+                torch.sum((points_sample - points_chief) * d_parallel, -1),
+                l0
+            )
+        ref_idx = self.surfaces.env_material.n(wl, 'm')
+        ray = BatchedRay(points_sample, d_sample, wl, l0 * ref_idx, d_normalized=True)  # ... x N_wl x N_spp
+        return ray, chief_ray
+
+    def _plot_components(self, ax):
+        uppers = []
+        lowers = []
+        for sf in self.surfaces:  # surfaces
+            sf: surf.Surface
+            y = torch.linspace(-sf.aperture.radius, sf.aperture.radius, 100, device=self.device)
+            z = sf.h_extended(torch.zeros_like(y), y) + sf.context.z
+            ax.plot(utils.t4plot(z), utils.t4plot(y), color='black', linewidth=1)
+            uppers.append((z[-1].item(), y[-1].item()))
+            lowers.append((z[0].item(), y[0].item()))
+        for i in range(len(self.surfaces) - 1):  # edges
+            if self.surfaces[i].material.name == 'vacuum':
+                continue
+            ax.plot(*list(zip(uppers[i], uppers[i + 1])), color='black', linewidth=1)
+            ax.plot(*list(zip(lowers[i], lowers[i + 1])), color='black', linewidth=1)
+
+    def _plot_rays(self, ax, ray: BatchedRay, fov: Ts, wl: Ts):  # ray: N_fov x N_wl x N_spp
+        ray.norm_d_().broadcast_().march_to_(ray.new_tensor(0.))
+        colors = [utils.wl2rgb(_wl, output_format='hex') for _wl in wl.tolist()]
+        alphas = _plot_fov_alphas(fov.numel())
+        rays_record = []
+        for sf in self.surfaces:
+            out_ray = sf(ray)
+            rays_record.append(out_ray)
+            ray = out_ray
+        out_ray = ray.march_to(self.surfaces.total_length)
+        rays_record.append(out_ray)
+        for ray, next_ray in zip(rays_record[:-1], rays_record[1:]):
+            _plot_rays_3d(ax, ray.o, next_ray.o, out_ray.valid, colors, alphas)

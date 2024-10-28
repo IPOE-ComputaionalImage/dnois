@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from .ray import BatchedRay
-from ... import mt, base
+from ... import mt, base, utils
 from ...base.typing import (
     Sequence, Ts, Any, Callable, Scalar, Self, Size2d,
     scalar, size2d, cast
@@ -21,15 +21,18 @@ __all__ = [
     'Aperture',
     'BatchedRay',
     'CircularAperture',
+    'CircularStop',
     'CircularSurface',
     'Context',
+    'PlanarSurface',
+    'Stop',
     'Surface',
     'SurfaceList',
 ]
 
 NT_MAX_ITERATION: int = 10
 NT_THRESHOLD: float = 20e-9
-NT_THRESHOLD_STRICT: float = 20e-9
+NT_THRESHOLD_STRICT: float = NT_THRESHOLD
 NT_UPDATE_BOUND: float = 5.
 NT_EPSILON: float = 1e-9
 
@@ -159,6 +162,22 @@ class Aperture(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         """
         return self.evaluate(ray.x, ray.y)
 
+    def sample(self, mode: str, *args, **kwargs) -> tuple[Ts, Ts]:
+        """
+        Samples points on this aperture, i.e. baseline plane of associated surface.
+        Specific distribution depends on ``mode``.
+
+        :param str mode: Sampling mode. Calling object of this method should possess a
+            ``sample_{mode}`` method.
+        :return: Two 1D tensors of representing x and y coordinates of the points.
+        :rtype: tuple[Tensor, Tensor]
+        """
+        meth_name = 'sample_' + mode
+        meth: Callable = getattr(self, meth_name, ...)
+        if meth is ...:
+            raise ValueError(f'Unknown sampling mode for {self.__class__.__name__}: {mode}')
+        return meth(*args, **kwargs)
+
 
 class CircularAperture(Aperture):
     """
@@ -172,6 +191,8 @@ class CircularAperture(Aperture):
         super().__init__()
         if radius <= 0:
             raise ValueError('radius must be positive')
+
+        self.register_buffer('radius', None, False)
         self.radius: Ts = scalar(radius)  #: Radius of the aperture.
 
     def evaluate(self, x: Ts, y: Ts) -> torch.BoolTensor:
@@ -201,6 +222,28 @@ class CircularAperture(Aperture):
         r = r * self.radius
         return r * t.cos(), r * t.sin()
 
+    def sample_rect(self, n: Size2d) -> tuple[Ts, Ts]:
+        r"""
+        Samples points on this aperture in a evenly spaced rectangular grid,
+        where number of points in vertical and horizontal directions :math:`(H, W)`
+        are given by ``n``. Note that the points outside the aperture are dropped
+        so total number of returned points are is less than :math:`HW`.
+
+        :param n: A pair of int representing :math:`(H, W)`.
+        :type n: int | tuple[int, int]
+        :return: Two 1D tensors of representing x and y coordinates of the points.
+        :rtype: tuple[Tensor, Tensor]
+        """
+        h, w = size2d(n)
+        y, x = utils.sym_grid(
+            2, (h, w), (2 * self.radius / h, 2 * self.radius / w), True,
+            device=self.device, dtype=self.dtype
+        )
+        y, x = torch.broadcast_tensors(y, x)
+        x, y = x.flatten(), y.flatten()
+        valid = self.evaluate(x, y)
+        return x[valid], y[valid]
+
     def sample_unipolar(self, n: Size2d) -> tuple[Ts, Ts]:
         r"""
         Samples points on this aperture in a unipolar manner. Specifically, the aperture
@@ -225,6 +268,24 @@ class CircularAperture(Aperture):
         ]
         t = torch.cat([zero] + t)
         return r * t.cos(), r * t.sin()
+
+    def sample_diameter(self, n: int, theta: float | Ts) -> tuple[Ts, Ts]:
+        """
+        Samples points on diameter line segments of this aperture.
+        Polar angle of the line is given by ``theta``.
+
+        :param int n: Number of points.
+        :param theta: Polar angle of the line. A single float or a tensor with any shape.
+        :type theta: float | Tensor
+        :return: Two tensors representing x and y coordinates of the points.
+            If ``theta`` is a float, with shape ``(n,)``; if a tensor with shape ``(...)``,
+            with shape ``(..., n)``.
+        """
+        if not torch.is_tensor(theta):
+            theta = torch.tensor(theta, dtype=self.dtype, device=self.device)
+        r = torch.linspace(-1, 1, n, device=self.device, dtype=self.dtype) * self.radius
+        theta = theta.unsqueeze(-1)
+        return r * theta.cos(), r * theta.sin()
 
     def _delegate(self) -> Ts:
         return self.radius
@@ -367,16 +428,13 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
             A new :py:class:`~BatchedRay` object.
         :rtype: BatchedRay
         """
-        magnitude = self._nt_threshold_strict / torch.finfo(ray.o.dtype).eps
-        if torch.abs(ray.z - self.context.z).gt(magnitude).any():
-            new_z = self.context.z - magnitude if forward else self.context.z + magnitude
-            ray.march_to_(new_z, self.context.material_before.n(ray.wl, 'm'))
+        valid = self._prop_check(ray, forward)
+        ray = ray.update_valid(valid)
 
-        if forward:
-            valid = torch.logical_and(self._f(ray) >= 0, ray.d_z > 0)
-        else:
-            valid = torch.logical_and(self._f(ray) <= 0, ray.d_z < 0)
-        ray.update_valid_(valid)
+        # magnitude = self._nt_threshold_strict / torch.finfo(ray.o.dtype).eps
+        # if torch.abs(ray.z - self.context.z).gt(magnitude).any():
+        #     new_z = self.context.z - magnitude if forward else self.context.z + magnitude
+        #     ray = ray.march_to(new_z, self.context.material_before.n(ray.wl, 'm'))
 
         return self.refract(self.intercept(ray), forward)
 
@@ -393,28 +451,12 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         :return: Intercepted rays.
         :rtype: BatchedRay
         """
-        # TODO: optimize
-        t = (self.context.z - ray.z) / ray.d_z
-        cnt = 0  # equal to numbers of derivative computation
-        new_ray = ray.clone(False)
-        new_ray.norm_d_()
-        with torch.no_grad():
-            while True:
-                new_ray.o = ray.o + new_ray.d_norm * t.unsqueeze(-1)  # do not compute opl for root finder
-                f_value = self._f(new_ray)
-                if torch.all(f_value.abs() < self._nt_threshold) or cnt >= self._nt_max_iteration:
-                    break
-
-                t = t - self._newton_descent(new_ray, f_value)
-                cnt += 1
-
-        # the second argument cannot be replaced by f_value because of computational graph
-        t = t - self._newton_descent(new_ray, self._f(new_ray))
+        ray = ray.norm_d()
+        t = self._solve_t(ray)
         ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
         ray.update_valid_(
             self.aperture.pass_ray(ray) &
-            (self._f(ray).abs() < self._nt_threshold_strict) &
-            (t > 0)
+            (self._f(ray).abs() < self._nt_threshold_strict)
         )
         return ray
 
@@ -429,7 +471,7 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
             dimension of size 3 following.
         :rtype: Tensor
         """
-        phpx, phpy = self.h_grad(x, y)
+        phpx, phpy = self.h_grad_extended(x, y)
         f_grad = torch.stack((-phpx, -phpy, torch.ones_like(phpx)), dim=-1)
         return f_grad / f_grad.norm(2, -1, True)
 
@@ -461,6 +503,9 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         :rtype: BatchedRay
         """
         ray = ray.clone(False)
+        if self.context.material_before == self.material:
+            return ray
+
         n = self.normal(ray.x, ray.y)
         i = ray.d_norm
         if forward:
@@ -469,12 +514,25 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
             miu = self.material.n(ray.wl, 'm') / self.context.material_before.n(ray.wl, 'm')
             n = -n
         miu = miu.unsqueeze(-1)
-        ni = torch.sum(n * i, dim=-1).unsqueeze(-1)
+        ni = torch.sum(n * i, -1, True)
         nt2 = 1 - miu.square() * (1 - ni.square())
-        t = torch.sqrt(nt2.relu_()) * n + miu * (i - ni * n)
+        t = torch.sqrt(nt2.relu()) * n + miu * (i - ni * n)
         ray.d = t
-        ray.update_valid_(nt2.squeeze(-1) > 0).norm_d_()
+        ray.update_valid_(nt2.squeeze(-1) >= 0).norm_d_()
         return ray
+
+    def sample(self, mode: str, *args, **kwargs) -> Ts:
+        """
+        Samples points on this surface. They are first sampled by :meth:`Aperture.sample`.
+
+        :param str mode: Sampling mode. See :meth:`Aperture.sample`.
+        :return: A tensor with shape ``(n, 3)`` where ``n`` is number of samples.
+            ``3`` means 3D spatial coordinates.
+        :rtype: Tensor
+        """
+        x, y = self.aperture.sample(mode, *args, **kwargs)
+        z = self.h_extended(x, y) + self.context.z
+        return torch.stack([x, y, z], dim=-1)
 
     def _delegate(self) -> Ts:
         return self.distance
@@ -492,6 +550,96 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
         return descent
 
+    def _prop_check(self, ray: BatchedRay, forward: bool) -> Ts:
+        if forward:
+            valid = torch.logical_and(self._f(ray) >= 0, ray.d_z > 0)
+        else:
+            valid = torch.logical_and(self._f(ray) <= 0, ray.d_z < 0)
+        return valid
+
+    def _solve_t(self, ray: BatchedRay) -> Ts:
+        # TODO: optimize
+        ray = ray.norm_d()
+        t = (self.context.z - ray.z) / ray.d_z
+        cnt = 0  # equal to numbers of derivative computation
+        new_ray = ray.clone(False)
+        with torch.no_grad():
+            while True:
+                new_ray.o = ray.o + new_ray.d_norm * t.unsqueeze(-1)  # do not compute opl for root finder
+                f_value = self._f(new_ray)
+                if torch.all(f_value.abs() < self._nt_threshold) or cnt >= self._nt_max_iteration:
+                    break
+
+                t = t - self._newton_descent(new_ray, f_value)
+                cnt += 1
+
+        # the second argument cannot be replaced by f_value because of computational graph
+        return t - self._newton_descent(new_ray, self._f(new_ray))
+
+
+class PlanarSurface(Surface):
+
+    def h(self, x: Ts, y: Ts) -> Ts:
+        return self.new_zeros(torch.broadcast_shapes(x.shape, y.shape))
+
+    def h_extended(self, x: Ts, y: Ts) -> Ts:
+        return self.new_zeros(torch.broadcast_shapes(x.shape, y.shape))
+
+    def h_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        return torch.zeros_like(x), torch.zeros_like(y)
+
+    def h_grad_extended(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        return torch.zeros_like(x), torch.zeros_like(y)
+
+    def intercept(self, ray: BatchedRay) -> BatchedRay:
+        new_ray = ray.march_to(self.context.z, self.context.material_before.n(ray.wl, 'm'))
+        new_ray = self.aperture(new_ray)
+        return new_ray
+
+    def normal(self, x: Ts, y: Ts) -> Ts:
+        return torch.stack([torch.zeros_like(x), torch.zeros_like(y), torch.ones_like(x)], -1)
+
+    def _solve_t(self, ray: BatchedRay) -> Ts:
+        ray = ray.norm_d()
+        return (self.context.z - ray.z) / ray.d_z
+
+
+class Stop(PlanarSurface):
+    def __init__(self, distance: Scalar, aperture: Aperture, move_ray: bool = True):
+        super().__init__('vacuum', distance, aperture, None)
+        self._move_ray = move_ray
+
+    def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        valid_prop = self._prop_check(ray, forward)
+
+        if self._move_ray:
+            ray = ray.update_valid(valid_prop)
+            ray.march_to_(self.context.z, self.context.material_before.n(ray.wl, 'm'))
+            return self.aperture(ray)
+        else:
+            ray = ray.norm_d()
+            t = (self.context.z - ray.z) / ray.d_z
+            new_o = ray.o + t * ray.d_norm
+            valid_ap = self.aperture.evaluate(new_o[..., 0], new_o[..., 1])
+            return ray.update_valid(valid_prop & valid_ap)
+
+    def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
+        return ray.clone()
+
+    @property
+    def material(self) -> mt.Material:  # override
+        return self.context.material_before
+
+    @material.setter
+    def material(self, value):
+        pass
+
+
+class CircularStop(Stop):
+    def __init__(self, distance: Scalar, radius: Scalar):
+        aperture = CircularAperture(radius)
+        super().__init__(distance, aperture)
+
 
 class CircularSurface(Surface, metaclass=abc.ABCMeta):
     r"""
@@ -507,29 +655,29 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
      circularly symmetric. In other words, ``aperture`` need not be an instance of
      :class:`CircularAperture`.
 
-    :param float radius: Radius of effective region of the surface.
     :param material: Material following the surface. Either a :py:class:`~dnois.mt.Material`
         instance or a str representing the name of a registered material.
     :type material: :py:class:`~dnois.mt.Material` or str
     :param distance: Distance between the surface and the next one.
-    :param Aperture aperture: Aperture of this surface. Default: a circular aperture whose
-        radius is ``radius``.
+    :param aperture: Aperture of this surface. If a float, the aperture will be a
+        :class:`CircularAperture` whose radius is the given value. Default: infinity.
+    :type aperture: Aperture or float
     :param dict newton_config: Configuration for Newton's method.
         See :ref:`configuration_for_newtons_method` for details.
     """
 
     def __init__(
         self,
-        radius: float,
         material: mt.Material | str,
         distance: Scalar,
-        aperture: Aperture = None,
+        aperture: Aperture | float = None,
         newton_config: dict[str, Any] = None
     ):
         if aperture is None:
-            aperture = CircularAperture(radius)
+            aperture = float('inf')
+        if isinstance(aperture, float):
+            aperture = CircularAperture(aperture)
         super().__init__(material, distance, aperture, newton_config)
-        self.radius: float = radius  #: Radius of effective region of the surface.
 
     @abc.abstractmethod
     def h_r2(self, r2: Ts) -> Ts:
@@ -543,6 +691,16 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
+    def h_derivative_r2(self, r2: Ts) -> Ts:
+        r"""
+        Computes derivative :math:`\frac{\d\hat{h}(r^2)}{\d r^2}`.
+
+        :param Tensor r2: Squared radial distance.
+        :return: Corresponding value of the derivative.
+        :rtype: Tensor
+        """
+        pass
+
     def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
         r"""
         Computes the partial derivatives of surface function
@@ -555,7 +713,10 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         :return: Corresponding value of two partial derivatives.
         :rtype: tuple[Tensor, Tensor]
         """
-        pass
+        if r2 is None:
+            r2 = x.square() + y.square()
+        derivative_double = self.h_derivative_r2(r2) * 2
+        return derivative_double * x, derivative_double * y
 
     def h(self, x: Ts, y: Ts) -> Ts:
         return self.h_r2(x.square() + y.square())
@@ -580,8 +741,10 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
             r2 = x.square() + y.square()
         lim2 = self.geo_radius.square()
         phpx, phpy = self.h_grad(x, y, r2)
+        if lim2.isinf().all():
+            return phpx, phpy
         mask = r2 <= lim2
-        return torch.where(mask, phpx, 0), torch.where(mask, phpy, r2)
+        return torch.where(mask, phpx, 0), torch.where(mask, phpy, 0)
 
     def h_extended_r2(self, r2: Ts) -> Ts:
         r"""
@@ -589,6 +752,8 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         See :py:meth:`~h_r2` and :py:meth:`~h_extended`.
         """
         lim2 = self.geo_radius.square()
+        if lim2.isinf().all():
+            return self.h_r2(r2)
         return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2))
 
     @property
@@ -599,7 +764,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
 
         :type: Tensor
         """
-        return self.new_tensor(self.radius)
+        return self.new_tensor(float('inf'))
 
     def _f(self, ray: BatchedRay) -> Ts:
         return self.h_extended_r2(ray.r2) + self.context.z - ray.z
@@ -661,7 +826,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         self._slist.__getitem__(key).context = None
         self._slist.__delitem__(key)
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> Surface | list[Surface]:
         """:meta private:"""
         return self._slist.__getitem__(item)
 
@@ -780,7 +945,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         return ray
 
     @property
-    def surfaces(self) -> list[Surface]:
+    def tolist(self) -> list[Surface]:
         """
         Returns a list of contained surfaces.
 
@@ -789,45 +954,86 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         return [s for s in self._slist]
 
     @property
-    def length(self) -> Ts | None:
+    def first(self) -> Surface:
         """
-        Returns the distance between baselines of the first and the last surfaces
-        as a 0D tensor. If there is no more than one surface, returns ``None``.
+        Returns the first surface.
 
-        :type: Tensor or None
+        :type: :class:`Surface`.
         """
-        if len(self._slist) < 2:
-            return None
-        return sum(s.distance for s in self._slist[:-1])
+        return self[0]
 
     @property
-    def total_length(self) -> Ts | None:
+    def last(self) -> Surface:
+        """
+        Returns the last surface.
+
+        :type: :class:`Surface`.
+        """
+        return self[-1]
+
+    @property
+    def is_empty(self) -> bool:
+        """
+        Whether this list is empty.
+
+        :type: bool
+        """
+        return len(self._slist) == 0
+
+    @property
+    def length(self) -> Ts:
+        """
+        Returns the distance between baselines of the first and that of the last surfaces
+        as a 0D tensor.
+
+        :type: Tensor
+        """
+        return cast(Ts, sum(s.distance for s in self._slist[:-1]))
+
+    @property
+    def mt_head(self) -> mt.Material:
+        """
+        Returns the material before the first surface. Identical to :attr:`env_material`.
+
+        :type: :class:`~Material`
+        """
+        return self._slist[0].material
+
+    @property
+    def mt_tail(self) -> mt.Material:
+        """
+        Returns the material after the last surface.
+
+        :type: :class:`~Material`
+        """
+        return self._slist[-1].material
+
+    @property
+    def total_length(self) -> Ts:
         """
         Returns the sum of :py:attr:`Surface.distance` of all the surfaces
-        as a 0D tensor. If there is no surface, returns ``None``.
+        as a 0D tensor.
 
-        :type: Tensor or None
+        :type: Tensor
         """
-        if len(self._slist) == 0:
-            return None
-        return sum(s.distance for s in self._slist)
+        return cast(Ts, sum(s.distance for s in self._slist))
 
     @property
-    def stop_idx(self) -> int:
+    def stop_idx(self) -> int | None:
         """
         Index of the aperture stop. Returns ``None`` if no stop is found.
 
-        :type: int
+        :type: int or ``None``
         """
         return self._stop_idx
 
     @property
-    def stop(self) -> Surface:
+    def stop(self) -> CircularStop | None:
         """
         The aperture stop object. Returns ``None`` if no stop is found.
         Note that it need not return an instance of :py:class:`CircularStop`.
 
-        :type: :py:class:`CircularStop`
+        :type: :py:class:`CircularStop` or ``None``
         """
         idx = self._stop_idx
         return None if idx is None else self._slist[idx]

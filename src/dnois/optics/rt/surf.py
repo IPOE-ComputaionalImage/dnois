@@ -1,3 +1,5 @@
+import abc
+
 import torch
 from torch import nn
 
@@ -20,44 +22,20 @@ __all__ += _surf.__all__
 EDGE_CUTTING: float = 1 - 1e-5
 
 
-def _spherical(r2: Ts, c: Ts, k: Ts = None) -> Ts:
+def _spherical(r2: Ts, c: Ts, k: Ts = None) -> Ts:  # TODO: optimize
     a = c.square() if k is None else c.square() * (1 + k)
     return c * r2 / (1 + torch.sqrt(1 - r2 * a))
 
 
 def _spherical_der_wrt_r2(r2: Ts, c: Ts, k: Ts = None) -> Ts:
-    a = c.square() if k is None else c.square() * (1 + k)
-    b = torch.sqrt(1 - r2 * a)
-    return c / ((1 + b) * b)
+    _1 = c.square() if k is None else c.square() * (1 + k)
+    _2 = r2 * _1
+    _3 = torch.sqrt(1 - _2)
+    _4 = _3 + 1
+    return c / _4 * (1 + _2 / (2 * _3 * _4))
 
 
-class _SphericalBase(CircularSurface):
-    def __init__(
-        self, roc: Scalar,
-        radius: float,
-        material: mt.Material | str,
-        distance: Scalar,
-        aperture: Aperture = None,
-        newton_config: dict[str, Any] = None
-    ):
-        super().__init__(radius, material, distance, aperture, newton_config)
-        self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
-
-    def h_r2(self, r2: Ts) -> Ts:
-        return _spherical(r2, 1 / self.roc)
-
-    def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
-        if r2 is None:
-            r2 = x.square() + y.square()
-        der = _spherical_der_wrt_r2(r2, 1 / self.roc) * 2
-        return der * x, der * y
-
-    @property
-    def geo_radius(self) -> Ts:
-        return self.roc * EDGE_CUTTING
-
-
-class Spherical(_SphericalBase):
+class _SphericalBase(CircularSurface, metaclass=abc.ABCMeta):  # docstring for Spherical
     r"""
     Spherical surfaces.
 
@@ -69,25 +47,57 @@ class Spherical(_SphericalBase):
 
     where :math:`c` is radius of curvature.
 
-    See :py:class:`Surface` for more description of arguments.
+    See :py:class:`CircularSurface` for more description of arguments.
 
     :param roc: Radius of curvature.
     :type roc: float or Tensor
     """
 
-    # TODO: implement optimized intercept
     def __init__(
         self, roc: Scalar,
-        radius: float,
         material: mt.Material | str,
         distance: Scalar,
-        aperture: Aperture = None,
+        aperture: Aperture | float = None,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(roc, radius, material, distance, aperture, newton_config)
+        super().__init__(material, distance, aperture, newton_config)
+        self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
 
 
-class Conic(_SphericalBase):
+class Spherical(_SphericalBase):
+    __doc__ = _SphericalBase.__doc__
+
+    def h_r2(self, r2: Ts) -> Ts:
+        return _spherical(r2, 1 / self.roc)
+
+    def h_derivative_r2(self, r2: Ts) -> Ts:
+        return _spherical_der_wrt_r2(r2, 1 / self.roc)
+
+    @property
+    def geo_radius(self) -> Ts:
+        return self.roc * EDGE_CUTTING
+
+    # def _solve_t(self, ray: BatchedRay) -> Ts:
+    #     ray = ray.norm_d()
+    #     if self.roc.isinf().all():
+    #         return (self.context.z - ray.z) / ray.d_z
+    #
+    #     o_hat = torch.cat([ray.o[..., :2], ray.z.unsqueeze(-1) - self.context.z], -1) / self.roc
+    #     qc_b = torch.sum(o_hat * ray.d, -1) - ray.d_z  # quadratic coefficient: b
+    #     qc_c = o_hat.square().sum(-1) - 2 * o_hat[..., 2]  # quadratic coefficient: c
+    #     q_sqrt_delta = torch.sqrt(qc_b.square() - qc_c)  # sqrt of delta in quadratic equation
+    #     q_sqrt_delta = torch.copysign(q_sqrt_delta, ray.d_z)
+    #     t_hat = -qc_b - q_sqrt_delta
+    #     t = t_hat * self.roc
+    #
+    #     nan_mask = t.isnan()
+    #     if nan_mask.any():
+    #         h_ext_value = self.context.z + self.roc
+    #         t = torch.where(nan_mask, (h_ext_value - ray.z) / ray.d_z, t)
+    #     return t
+
+
+class _ConicBase(_SphericalBase, metaclass=abc.ABCMeta):  # docstring for Conic
     r"""
     Conic surfaces.
 
@@ -99,7 +109,7 @@ class Conic(_SphericalBase):
 
     where :math:`c` is radius of curvature and :math:`k` is conic coefficient.
 
-    See :py:class:`Surface` for more description of arguments.
+    See :py:class:`CircularSurface` for more description of arguments.
 
     :param roc: Radius of curvature.
     :type roc: float or Tensor
@@ -110,23 +120,16 @@ class Conic(_SphericalBase):
     def __init__(
         self, roc: Scalar,
         conic: Scalar,
-        radius: float,
         material: mt.Material | str,
         distance: Scalar,
-        aperture: Aperture = None,
+        aperture: Aperture | float = None,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(roc, radius, material, distance, aperture, newton_config)
+        super().__init__(roc, material, distance, aperture, newton_config)
         self.conic: nn.Parameter = nn.Parameter(scalar(conic))  #: Conic coefficient.
 
-    def h_r2(self, r2: Ts) -> Ts:
-        return _spherical(r2, 1 / self.roc, self.conic)
-
-    def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
-        if r2 is None:
-            r2 = x.square() + y.square()
-        der = _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic) * 2
-        return der * x, der * y
+    def h_derivative_r2(self, r2: Ts) -> Ts:
+        return _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
 
     @property
     def geo_radius(self) -> Ts:
@@ -136,11 +139,41 @@ class Conic(_SphericalBase):
             return self.roc / torch.sqrt(1 + self.conic) * EDGE_CUTTING
 
 
+class Conic(_ConicBase):
+    __doc__ = _ConicBase.__doc__
+
+    def h_r2(self, r2: Ts) -> Ts:
+        return _spherical(r2, 1 / self.roc, self.conic)
+
+    # def _solve_t(self, ray: BatchedRay) -> Ts:
+    #     if self.roc.isinf().all():
+    #         return (self.context.z - ray.z) / ray.d_z
+    #
+    #     o_hat = torch.cat([ray.o[..., :2], ray.z.unsqueeze(-1) - self.context.z], -1) / self.roc
+    #     qc_a = 1 + self.conic * ray.d_z.square()  # quadratic coefficient: a
+    #     _1 = o_hat * ray.d
+    #     _1[..., 2] = _1[..., 2] * (self.conic + 1)
+    #     qc_b = _1.sum(-1) - ray.d_z  # quadratic coefficient: b
+    #     _2 = o_hat.square()
+    #     _2[..., 2] = _2[..., 2] * (self.conic + 1)
+    #     qc_c = _2.sum(-1) - 2 * o_hat[..., 2]  # quadratic coefficient: c
+    #     q_sqrt_delta = torch.sqrt(qc_b.square() - qc_a * qc_c)
+    #     q_sqrt_delta = torch.copysign(q_sqrt_delta, ray.d_z)
+    #     t_hat = -(qc_b + q_sqrt_delta) / qc_a
+    #     t = t_hat * self.roc
+    #
+    #     nan_mask = t.isnan()
+    #     if nan_mask.any():
+    #         h_ext_value = self.context.z + self.roc
+    #         t = torch.where(nan_mask, (h_ext_value - ray.z) / ray.d_z, t)
+    #     return t
+
+
 class Standard(Conic):
     """Alias for :py:class:`~Conic`. This name complies with the convention of Zemax."""
 
 
-class EvenAspherical(Conic):
+class EvenAspherical(_ConicBase):
     r"""
     Even aspherical surfaces.
 
@@ -153,7 +186,7 @@ class EvenAspherical(Conic):
     where :math:`c` is radius of curvature, :math:`k` is conic coefficient
     and :math:`\{a_i\}_{i=1}^N` are even aspherical coefficients.
 
-    See :py:class:`Surface` for more description of arguments.
+    See :py:class:`CircularSurface` for more description of arguments.
 
     :param roc: Radius of curvature.
     :type roc: float or Tensor
@@ -167,30 +200,26 @@ class EvenAspherical(Conic):
         self, roc: Scalar,
         conic: Scalar,
         coefficients: Vector,
-        radius: float,
         material: mt.Material | str,
         distance: Scalar,
-        aperture: Aperture = None,
+        aperture: Aperture | float = None,
         newton_config: dict[str, Any] = None
     ):
-        super().__init__(roc, conic, radius, material, distance, aperture, newton_config)
+        super().__init__(roc, conic, material, distance, aperture, newton_config)
         self.coefficients: nn.Parameter = nn.Parameter(vector(coefficients))  #: Aspherical coefficients.
 
     def h_r2(self, r2: Ts) -> Ts:
         a = 0
         for c in reversed(self.coefficients):
             a = (a + c) * r2
-        return super().h_r2(r2) + a
+        return _spherical(r2, 1 / self.roc, self.conic) + a
 
-    def h_grad(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
-        if r2 is None:
-            r2 = x.square() + y.square()
+    def h_derivative_r2(self, r2: Ts) -> Ts:
         s_der = _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
         a_der = 0
         for i in range(self.coefficients.numel(), 0, -1):
             a_der = a_der * r2 + self.coefficients[i - 1] * i
-        der = (s_der + a_der) * 2
-        return der * x, der * y
+        return s_der + a_der
 
     @property
     def even_aspherical_items(self) -> int:
@@ -220,7 +249,7 @@ def _coordinate2index(x: Ts, n: int) -> tuple[Ts, Ts]:
     return idx.int().clamp(0, n - 1), x - x_cell
 
 
-class PlanarPhase(Surface):
+class PlanarPhase(PlanarSurface):
     """
     This class is subject to change.
     """
@@ -246,23 +275,6 @@ class PlanarPhase(Surface):
         self.size: tuple[float, float] = size
         # no constraint on value of phase currently
         self.phase = nn.Parameter(phase, requires_grad=optimize_phase)  #: Phase shift.
-
-    def h(self, x: Ts, y: Ts) -> Ts:
-        return torch.zeros_like(torch.broadcast_tensors(x, y)[0])
-
-    def h_extended(self, x: Ts, y: Ts) -> Ts:
-        return torch.zeros_like(torch.broadcast_tensors(x, y)[0])
-
-    def h_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
-        return torch.zeros_like(x), torch.zeros_like(y)
-
-    def h_grad_extended(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
-        return torch.zeros_like(x), torch.zeros_like(y)
-
-    def intercept(self, ray: BatchedRay) -> BatchedRay:
-        new_ray = ray.march_to(self.context.z)
-        new_ray = self.aperture(new_ray)
-        return new_ray
 
     def phase_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
         p = self.phase  # N_y x N_x
@@ -308,7 +320,7 @@ class PlanarPhase(Surface):
 
     @property
     def cell_size(self) -> tuple[float, float]:
-        return 2 * self.size[0] / (self.phase.size(0) - 2), 2 * self.size[1] / (self.phase.size(1) - 2)
+        return 2 * self.size[0] / (self.phase.size(0) - 1), 2 * self.size[1] / (self.phase.size(1) - 1)
 
 
 def build_surface(surface_config: dict[str, Any]) -> CircularSurface:
