@@ -2,8 +2,6 @@ furo
 lightning
 matplotlib
 notebook
-omegaconf
-scipy
 sphinx
 tensorboard
 torch

@@ -14,6 +14,7 @@ TODO: description of this page
 .. toctree::
     :maxdepth: 1
 
+    ref/dnois
     ref/fourier
     ref/mt
     ref/optics

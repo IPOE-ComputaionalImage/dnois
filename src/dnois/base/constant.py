@@ -1,41 +1,91 @@
+import csv
+import importlib.resources
+
 import torch
 
 __all__ = [
-    'DPI',
-    'FRAUNHOFER_LINES',
+    'fline',
+    'fraunhofer_line',
 ]
 
-DPI = 2 * torch.pi
-FRAUNHOFER_LINES = {  # https://en.wikipedia.org/wiki/Fraunhofer_lines
-    'y': 898.765e-9,
-    'Z': 822.696e-9,
-    'A': 759.370e-9,
-    'B': 686.719e-9,
-    'C': 656.281e-9,
-    'a': 627.661e-9,
-    'D1': 589.592e-9,
-    'D2': 588.995e-9,
-    'D3': 587.5618e-9,
-    'd': 587.5618e-9,
-    'e_Hg': 546.073e-9,
-    'E2': 527.039e-9,
-    'b1': 518.362e-9,
-    'b2': 517.270e-9,
-    'b3': 516.891e-9,
-    'b4': 516.733e-9,
-    'c': 495.761e-9,
-    'F': 486.134e-9,
-    'd_Fe': 466.814e-9,
-    'e_Fe': 438.355e-9,
-    'G\'': 434.047e-9,
-    'G_Fe': 430.790e-9,
-    'G_Ca': 430.774e-9,
-    'h': 410.175e-9,
-    'H': 396.847e-9,
-    'K': 393.366e-9,
-    'L': 382.044e-9,
-    'N': 358.121e-9,
-    'P': 336.112e-9,
-    'T': 302.108e-9,
-    't': 299.444e-9,
-}
+
+def _build_fraunhofer_db() -> list[tuple[str, str, float]]:
+    with importlib.resources.open_text(__package__, 'fl.csv') as f:
+        return [(line[0], line[1], float(line[2]) * 1e-9) for line in csv.reader(f)]
+
+
+_fraunhofer_line_db = _build_fraunhofer_db()
+
+
+def fraunhofer_line(
+    symbol: str = None, element: str = None, alone: bool = True,
+) -> float | dict[str, float] | list[tuple[str, str, float]]:
+    """
+    Returns information about `Fraunhofer lines <https://en.wikipedia.org/wiki/Fraunhofer_lines>`_.
+
+    The type of return value depends on which arguments are given (when ``alone`` is ``False``):
+
+    - If no arguments are given, returns a list of ``(symbol, element, wavelength)`` tuples
+      for all lines.
+    - If only ``symbol`` is given, returns a dict whose keys and values are respectively
+      elements and wavelengths of lines with given symbol. Note that distinct lines
+      may have same symbols.
+    - If only ``element`` is given, returns a dict whose keys and values are respectively
+      symbols and wavelengths of lines with given element. Note that one element may
+      have multiple lines.
+    - If both are given, returns a single float indicating corresponding wavelength.
+
+    If ``alone`` is ``True`` and a ``dict`` to be returned contains only one item,
+    that wavelength will be returned instead.
+
+    .. testsetup::
+
+        from dnois import fraunhofer_line
+
+    >>> fraunhofer_line('d', 'He')
+    5.875618e-07
+    >>> fraunhofer_line('d')
+    {'He': 5.875618e-07, 'Fe': 4.6681400000000004e-07}
+    >>> fraunhofer_line(element='Na')
+    {'D_1': 5.89592e-07, 'D_2': 5.889950000000001e-07}
+    >>> fraunhofer_line('C')  # alone=True
+    6.56281e-07
+
+    .. note::
+
+        The 587.5618nm line has two symbols: :math:`D_3` and :math:`d`.
+        Both of them are valid to retrieve this line.
+
+    :param str symbol: Symbol of lines to retrieve.
+    :param str element: Element of lines to retrieve.
+    :param bool alone: If ``True``, returns wavelength directly instead of a ``dict``
+        if just one item matches. Default: ``True``.
+    :return: See description above.
+    :rtype: float | dict[str, float] | list[tuple[str, str, float]]
+    """
+    if symbol is None:
+        if element is None:
+            return _fraunhofer_line_db.copy()
+        else:
+            ret = {item[0]: item[2] for item in _fraunhofer_line_db if item[1] == element}
+    elif element is None:
+        ret = {item[1]: item[2] for item in _fraunhofer_line_db if item[0] == symbol}
+    else:
+        for item in _fraunhofer_line_db:
+            if item[0] == symbol and item[1] == element:
+                return item[2]
+        raise KeyError(f'There is no Fraunhofer line with symbol {symbol} and element {element}. '
+                       f'Refer to https://en.wikipedia.org/wiki/Fraunhofer_lines for more information.')
+
+    if isinstance(ret, dict):
+        if len(ret) == 1 and alone:
+            return list(ret.values())[0]
+        else:
+            return ret
+
+
+def fline(
+    symbol: str = None, element: str = None, alone: bool = True,
+) -> float | dict[str, float] | list[tuple[str, str, float]]:
+    """Alias for :func:`fraunhofer_line`."""
+    return fraunhofer_line(str(symbol), element, alone)

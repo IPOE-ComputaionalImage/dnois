@@ -28,13 +28,13 @@ __all__ = [
     'ConvOut',
     'FovSeg',
     'Numeric',
+    'PsfCenter',
     'RGBFormat',
     'Scalar',
     'SclOrVec',
     'Size2d',
     'Sizend',
     'Spacing',
-    'SurfSample',
     'Tensor',
     'Ts',
     'Vector',
@@ -61,8 +61,8 @@ Sizend = Union[int, Sequence[int]]
 # options
 FovSeg = Literal['paraxial', 'pointwise']
 ConvOut = Literal['full', 'same', 'valid']
-SurfSample = Literal['unipolar', 'rectangular', 'random']
 RGBFormat = Literal['floats', 'ints', 'hex']
+PsfCenter = Literal['linear', 'mean', 'chief']
 
 
 def size2d(size: Size2d) -> tuple[int, int]:
@@ -150,3 +150,13 @@ def scl_or_vec(arg: SclOrVec, dtype: _dty = None, device: Device = None, **kwarg
 
 def pair(arg: Union[_T, tuple[_T, _T]]) -> tuple[_T, _T]:
     return arg if isinstance(arg, tuple) else (arg, arg)
+
+
+def check_3d_vector(ts: Ts, name: str = 'a 3d vector'):
+    if ts.ndim < 1 or ts.size(-1) != 3:
+        raise ShapeError(f'Size of last dimension of {name} must be 3, got shape {ts.shape}')
+
+
+def check_2d_vector(ts: Ts, name: str = 'a 2d vector'):
+    if ts.ndim < 1 or ts.size(-1) != 2:
+        raise ShapeError(f'Size of last dimension of {name} must be 2, got shape {ts.shape}')

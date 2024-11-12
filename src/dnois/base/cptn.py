@@ -59,7 +59,7 @@ def wave_vec(wl: Numeric) -> Numeric:
     Computes magnitude of wavelength vector:
 
     .. math::
-        k=2*\pi/\lambda
+        k=2\pi/\lambda
 
     :param wl: Wavelength :math:`\lambda`.
     :type wl: Tensor or float

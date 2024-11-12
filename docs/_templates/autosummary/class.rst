@@ -6,4 +6,4 @@
 
 .. autoclass:: {{ name | escape }}
     :members:
-    :inherited-members: Module
+    :inherited-members: Module, TensorAsDelegate

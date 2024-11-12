@@ -73,6 +73,13 @@ class TensorAsDelegate:
 
 
 class DeviceMixIn(TensorAsDelegate):
+    """
+    Some :py:class:`torch.Tensor` s may be associated to objects of the class
+    (e.g. buffers and parameters of :py:class:`torch.nn.Module`)
+    derived from this class. They are assumed to be on the same device,
+    which is the value of :attr:`device`.
+    """
+
     def _check_consistency(self, ts: Ts, error: bool = True) -> bool:
         return _check_consistency('device', self, ts, error)
 
@@ -84,17 +91,21 @@ class DeviceMixIn(TensorAsDelegate):
         """
         Device of this object.
 
-        Some :py:class:`torch.Tensor` s may be associated to an object of the class
-        (e.g. buffers and parameters of :py:class:`torch.nn.Module`)
-        possessing this property. They are assumed to be on the same device,
-        which is the value of this property.
-
         :type: :py:class:`torch.device`
         """
-        return self._delegate().device
+        dlg = self._delegate()
+        # torch.get_default_device() is not available for old versions
+        return torch.tensor(0.).device if dlg is None else dlg.device
 
 
 class DtypeMixIn(TensorAsDelegate):
+    """
+    Some :py:class:`torch.Tensor` s may be associated to objects of the class
+    (e.g. buffers and parameters of :py:class:`torch.nn.Module`)
+    derived from this class. They are assumed to have same data type,
+    which is the value of :attr:`dtype`.
+    """
+
     def _check_consistency(self, ts: Ts, error: bool = True) -> bool:
         return _check_consistency('dtype', self, ts, error)
 
@@ -106,14 +117,10 @@ class DtypeMixIn(TensorAsDelegate):
         """
         Data type of this object.
 
-        Some :py:class:`torch.Tensor` s may be associated to an object of the class
-        (e.g. buffers and parameters of :py:class:`torch.nn.Module`)
-        possessing this property. They are assumed to have same data type,
-        which is the value of this property.
-
         :type: :py:class:`torch.dtype`
         """
-        return self._delegate().dtype
+        dlg = self._delegate()
+        return torch.get_default_dtype() if dlg is None else dlg.dtype
 
 
 class TensorContainerMixIn(DeviceMixIn, DtypeMixIn):
@@ -134,7 +141,7 @@ def _match_annotation(ba: inspect.BoundArguments, params) -> bool:
     return True
 
 
-def get_bound_args(func, *args, **kwargs) -> inspect.BoundArguments:
+def get_bound_args(func, *args, **kwargs) -> inspect.BoundArguments:  # check: no use currently
     ols = get_overloads(func)
     if not ols:
         warnings.warn(f'Trying to {get_bound_args.__name__} on a function without overloads')
@@ -165,8 +172,20 @@ def broadcastable(*shapes: Sequence[int]) -> bool:
     pass
 
 
-def broadcastable(*tensors_or_shapes) -> bool:
-    if torch.is_tensor(tensors_or_shapes[0]):
+def broadcastable(*tensors_or_shapes: Sequence[int] | Ts) -> bool:
+    r"""
+    Check whether some tensors or some tensor shapes are broadcastable.
+
+    :param tensors_or_shapes: Some tensors or some tensor shapes.
+    :return: Whether they are broadcastable.
+    :rtype: bool
+    """
+    is_tensor = all(torch.is_tensor(x) for x in tensors_or_shapes)
+    is_shape = all(torch.is_tensor(x) for x in tensors_or_shapes)
+    if not is_tensor and not is_shape:
+        raise TypeError(f'Arguments of {broadcastable.__name__} must be all tensors or all shapes, '
+                        f'but got types {[type(x) for x in tensors_or_shapes]}')
+    if is_tensor:
         shapes = [t.shape for t in tensors_or_shapes]
     else:
         shapes = tensors_or_shapes

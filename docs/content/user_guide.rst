@@ -11,4 +11,5 @@ TODO
 .. toctree::
     :maxdepth: 2
 
+    guide/debug
     guide/imodel
