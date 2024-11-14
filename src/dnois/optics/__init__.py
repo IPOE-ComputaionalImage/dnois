@@ -1,7 +1,7 @@
 """
 This package implements various optical systems, which takes as inputs the
 scene information and computes the radiance field impinging on the sensor plane.
-See :doc:`/content/guide/imodel` for more information.
+See :doc:`/content/guide/optics/imodel` for more information.
 
 The content concerning optical system can be roughly divided into two parts:
 :ref:`modeling_optical_systems` and :ref:`image_formation`.

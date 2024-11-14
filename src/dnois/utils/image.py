@@ -14,7 +14,7 @@ __all__ = [
     'PatchMerging',
 ]
 
-PatchMerging = Literal['avg', 'slope']
+PatchMerging = Literal['avg', 'crop', 'slope']
 
 
 def _average_merge(img, patch_n, patch_sz, overlap, patches):
@@ -31,6 +31,23 @@ def _average_merge(img, patch_n, patch_sz, overlap, patches):
         left = j * (patch_sz[1] - overlap[1])
         img[..., left:left + overlap[1]] /= 2
 
+    return img
+
+
+def _crop_merge(img: Ts, patch_n, patch_sz, overlap, patches):
+    uppers = [i * (patch_sz[0] - overlap[0]) + overlap[0] // 2 for i in range(patch_n[0])]
+    lefts = [i * (patch_sz[1] - overlap[1]) + overlap[1] // 2 for i in range(patch_n[1])]
+    uppers[0] = 0
+    lefts[0] = 0
+    uppers.append(img.size(-2))
+    lefts.append(img.size(-1))
+    for i in range(patch_n[0]):
+        crop_up = 0 if i == 0 else overlap[0] // 2
+        for j in range(patch_n[1]):
+            crop_left = 0 if j == 0 else overlap[1] // 2
+            patch = patches[i][j].narrow(-2, crop_up, uppers[i + 1] - uppers[i])
+            patch = patch.narrow(-1, crop_left, lefts[j + 1] - lefts[j])
+            img[..., uppers[i]:uppers[i + 1], lefts[j]:lefts[j + 1]] += patch
     return img
 
 
@@ -72,8 +89,8 @@ def partition(
     Partition an image into patches, either overlapping or not.
 
     Neighboring patches have an overlapping boundary of width ``overlap``. Therefore, the
-    size of single patch is: PH = (H + ``overlap[0]``) / ``n_patches[0]``, PW = (W +
-    ``overlap[1]``) / ``n_patches[1]``.
+    size of single patch is: ``PH = (H + overlap[0]) / n_patches[0]``, ``PW = (W +
+    overlap[1]) / n_patches[1]``.
 
     :param Tensor image: One or more images of shape ... x H x W.
     :param n_patches: Number of patches in vertical and horizontal direction.
@@ -138,7 +155,7 @@ def partition_padded(
         wherein PH and PW are height and width of each patch, respectively.
     :rtype: list[Tensor] if ``sequential`` is ``True``, list[list[Tensor]] otherwise.
     """
-    n_patches=size2d(n_patches)
+    n_patches = size2d(n_patches)
     padding = size2d(padding)
     image = functional.pad(image, (padding[1], padding[1], padding[0], padding[0]), mode, value)
     img_patches = partition(image, n_patches, (2 * padding[0], 2 * padding[1]), sequential)
@@ -160,8 +177,17 @@ def merge_patches(
     :param overlap: Overlapping width in vertical and horizontal direction.
     :type: int | tuple[int, int]
     :param merge_method: The method used to determine the values of overlapping pixels.
-        Options: avg, slope
-    :type: Literal['avg', 'slope']
+
+        ``avg``
+            In each overlapping position, pixels of involved patches are averaged.
+
+        ``crop``
+            Both of two overlapping patches fill half the overlapping region.
+
+        ``slope``
+            In each overlapping position, pixels of involved patches are averaged
+            where the component closer to its patches has larger weights.
+    :type: Literal['avg', 'crop', 'slope']
     :return: A resulted image of shape ... x H x W.
     :rtype: Tensor
     """
@@ -175,15 +201,15 @@ def merge_patches(
         patch_n = (len(patches), len(patches[0]))
     img_sz = tuple([patch_n[i] * patch_sz[i] - (patch_n[i] - 1) * overlap[i] for i in (0, 1)])
 
-    img = first.new_empty(first.shape[:-2] + img_sz)
+    img = first.new_zeros(first.shape[:-2] + img_sz)
     if merge_method == 'avg':
-        img = _average_merge(img, patch_n, patch_sz, overlap, patches)
+        return _average_merge(img, patch_n, patch_sz, overlap, patches)
+    elif merge_method == 'crop':
+        return _crop_merge(img, patch_n, patch_sz, overlap, patches)
     elif merge_method == 'slope':
-        img = _slope_merge(img, patch_n, patch_sz, overlap, patches)
+        return _slope_merge(img, patch_n, patch_sz, overlap, patches)
     else:
         raise ValueError(f'Unknown merging method: {merge_method}')
-
-    return img
 
 
 def crop(image: Ts, cropping: Size2d) -> Ts:

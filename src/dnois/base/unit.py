@@ -69,6 +69,7 @@ def convert(value: Numeric, from_: str, to: str) -> Numeric:  # trailing underli
     :return: Converted quantity.
     :rtype: float | Tensor
     """
-    ratio = scale(from_) / scale(to)
-    value = value * ratio
+    if from_ != to:
+        ratio = scale(from_) / scale(to)
+        value = value * ratio
     return value

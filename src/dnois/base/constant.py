@@ -1,24 +1,19 @@
 import csv
 import importlib.resources
 
-import torch
+from . import unit as u
 
 __all__ = [
     'fline',
     'fraunhofer_line',
 ]
 
-
-def _build_fraunhofer_db() -> list[tuple[str, str, float]]:
-    with importlib.resources.open_text(__package__, 'fl.csv') as f:
-        return [(line[0], line[1], float(line[2]) * 1e-9) for line in csv.reader(f)]
-
-
-_fraunhofer_line_db = _build_fraunhofer_db()
+with importlib.resources.open_text(__package__, 'fl.csv') as f:
+    _fraunhofer_line_db = [(line[0], line[1], float(line[2]) * 1e-9) for line in csv.reader(f)]
 
 
 def fraunhofer_line(
-    symbol: str = None, element: str = None, alone: bool = True,
+    symbol: str = None, element: str = None, alone: bool = True, unit: str = None,
 ) -> float | dict[str, float] | list[tuple[str, str, float]]:
     """
     Returns information about `Fraunhofer lines <https://en.wikipedia.org/wiki/Fraunhofer_lines>`_.
@@ -60,32 +55,36 @@ def fraunhofer_line(
     :param str element: Element of lines to retrieve.
     :param bool alone: If ``True``, returns wavelength directly instead of a ``dict``
         if just one item matches. Default: ``True``.
+    :param str unit: Unit of returned wavelengths. Default: global default unit.
+        See :doc:`/content/guide/unit` for more information.
     :return: See description above.
     :rtype: float | dict[str, float] | list[tuple[str, str, float]]
     """
+    if unit is None:
+        unit = u.get_default_unit()
     if symbol is None:
         if element is None:
-            return _fraunhofer_line_db.copy()
+            return [(item[0], item[1], u.convert(item[2], 'm', unit)) for item in _fraunhofer_line_db]
         else:
-            ret = {item[0]: item[2] for item in _fraunhofer_line_db if item[1] == element}
+            ret = {item[0]: u.convert(item[2], 'm', unit) for item in _fraunhofer_line_db if item[1] == element}
     elif element is None:
-        ret = {item[1]: item[2] for item in _fraunhofer_line_db if item[0] == symbol}
+        ret = {item[1]: u.convert(item[2], 'm', unit) for item in _fraunhofer_line_db if item[0] == symbol}
     else:
         for item in _fraunhofer_line_db:
             if item[0] == symbol and item[1] == element:
-                return item[2]
+                return u.convert(item[2], 'm', unit)
         raise KeyError(f'There is no Fraunhofer line with symbol {symbol} and element {element}. '
                        f'Refer to https://en.wikipedia.org/wiki/Fraunhofer_lines for more information.')
 
-    if isinstance(ret, dict):
-        if len(ret) == 1 and alone:
-            return list(ret.values())[0]
-        else:
-            return ret
+    # ret is a dict
+    if len(ret) == 1 and alone:
+        return list(ret.values())[0]
+    else:
+        return ret
 
 
 def fline(
-    symbol: str = None, element: str = None, alone: bool = True,
+    symbol: str = None, element: str = None, alone: bool = True, unit: str = None,
 ) -> float | dict[str, float] | list[tuple[str, str, float]]:
     """Alias for :func:`fraunhofer_line`."""
-    return fraunhofer_line(str(symbol), element, alone)
+    return fraunhofer_line(str(symbol), element, alone, unit)

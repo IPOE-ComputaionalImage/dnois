@@ -11,5 +11,7 @@ TODO
 .. toctree::
     :maxdepth: 2
 
+    guide/overview
+    guide/unit
+    guide/optics
     guide/debug
-    guide/imodel

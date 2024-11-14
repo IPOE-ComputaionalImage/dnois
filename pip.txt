@@ -2,6 +2,7 @@ furo
 lightning
 matplotlib
 notebook
+numpy
 sphinx
 tensorboard
 torch

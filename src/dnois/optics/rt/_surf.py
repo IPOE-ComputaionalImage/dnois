@@ -222,7 +222,7 @@ class CircularAperture(Aperture):
         r = r * self.radius
         return r * t.cos(), r * t.sin()
 
-    def sample_rect(self, n: Size2d) -> tuple[Ts, Ts]:
+    def sample_rect(self, n: Size2d, mask_invalid: bool = True) -> tuple[Ts, Ts]:
         r"""
         Samples points on this aperture in a evenly spaced rectangular grid,
         where number of points in vertical and horizontal directions :math:`(H, W)`
@@ -242,7 +242,10 @@ class CircularAperture(Aperture):
         y, x = torch.broadcast_tensors(y, x)
         x, y = x.flatten(), y.flatten()
         valid = self.evaluate(x, y)
-        return x[valid], y[valid]
+        if mask_invalid:
+            return x[valid], y[valid]
+        else:
+            return x, y
 
     def sample_unipolar(self, n: Size2d) -> tuple[Ts, Ts]:
         r"""
@@ -258,7 +261,7 @@ class CircularAperture(Aperture):
         :rtype: tuple[Tensor, Tensor]
         """
         n = size2d(n)
-        zero = torch.tensor(0., dtype=self.dtype, device=self.device)
+        zero = torch.tensor([0.], dtype=self.dtype, device=self.device)
         r = torch.linspace(0, self.radius * EDGE_CUTTING, n[0] + 1, device=self.device, dtype=self.dtype)
         r = [r[i].expand(i * n[1]) for i in range(1, n[0] + 1)]  # n[1]*n[0]*(n[0]+1)/2
         r = torch.cat([zero] + r)  # n[1]*n[0]*(n[0]+1)/2+1
@@ -561,6 +564,7 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         # TODO: optimize
         ray = ray.norm_d()
         t = (self.context.z - ray.z) / ray.d_z
+        t0 = t
         cnt = 0  # equal to numbers of derivative computation
         new_ray = ray.clone(False)
         with torch.no_grad():
@@ -572,6 +576,11 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
 
                 t = t - self._newton_descent(new_ray, f_value)
                 cnt += 1
+
+            t = t - t0  # trace back
+
+        t = t + t0  # this is needed to compute gradient correctly
+        new_ray.o = ray.o + new_ray.d_norm * t.unsqueeze(-1)
 
         # the second argument cannot be replaced by f_value because of computational graph
         return t - self._newton_descent(new_ray, self._f(new_ray))
@@ -773,11 +782,11 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         phpx, phpy = self.h_grad_extended(ray.x, ray.y, ray.r2)
         return torch.stack((phpx, phpy, -torch.ones_like(phpx)), dim=-1)
 
-    def _newton_descent(self, ray: BatchedRay, f_value: Ts) -> Ts:
-        derivative_value = torch.sum(ray.d_norm * self._f_grad(ray), dim=-1)
-        descent = f_value / (derivative_value + self._nt_epsilon)
-        descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
-        return descent
+    # def _newton_descent(self, ray: BatchedRay, f_value: Ts) -> Ts:
+    #     derivative_value = torch.sum(ray.d_norm * self._f_grad(ray), dim=-1)
+    #     descent = f_value / (derivative_value + self._nt_epsilon)
+    #     descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
+    #     return descent
 
 
 class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):

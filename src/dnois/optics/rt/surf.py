@@ -77,24 +77,24 @@ class Spherical(_SphericalBase):
     def geo_radius(self) -> Ts:
         return self.roc * EDGE_CUTTING
 
-    # def _solve_t(self, ray: BatchedRay) -> Ts:
-    #     ray = ray.norm_d()
-    #     if self.roc.isinf().all():
-    #         return (self.context.z - ray.z) / ray.d_z
-    #
-    #     o_hat = torch.cat([ray.o[..., :2], ray.z.unsqueeze(-1) - self.context.z], -1) / self.roc
-    #     qc_b = torch.sum(o_hat * ray.d, -1) - ray.d_z  # quadratic coefficient: b
-    #     qc_c = o_hat.square().sum(-1) - 2 * o_hat[..., 2]  # quadratic coefficient: c
-    #     q_sqrt_delta = torch.sqrt(qc_b.square() - qc_c)  # sqrt of delta in quadratic equation
-    #     q_sqrt_delta = torch.copysign(q_sqrt_delta, ray.d_z)
-    #     t_hat = -qc_b - q_sqrt_delta
-    #     t = t_hat * self.roc
-    #
-    #     nan_mask = t.isnan()
-    #     if nan_mask.any():
-    #         h_ext_value = self.context.z + self.roc
-    #         t = torch.where(nan_mask, (h_ext_value - ray.z) / ray.d_z, t)
-    #     return t
+    def _solve_t(self, ray: BatchedRay) -> Ts:
+        ray = ray.norm_d()
+        if self.roc.isinf().all():
+            return (self.context.z - ray.z) / ray.d_z
+
+        o_hat = torch.cat([ray.o[..., :2], ray.z.unsqueeze(-1) - self.context.z], -1) / self.roc
+        qc_b = torch.sum(o_hat * ray.d, -1) - ray.d_z  # quadratic coefficient: b
+        qc_c = o_hat.square().sum(-1) - 2 * o_hat[..., 2]  # quadratic coefficient: c
+        q_sqrt_delta = torch.sqrt(qc_b.square() - qc_c)  # sqrt of delta in quadratic equation
+        q_sqrt_delta = torch.copysign(q_sqrt_delta, ray.d_z)
+        t_hat = -qc_b - q_sqrt_delta
+        t = t_hat * self.roc
+
+        nan_mask = t.isnan()
+        if nan_mask.any():
+            h_ext_value = self.context.z + self.roc
+            t = torch.where(nan_mask, (h_ext_value - ray.z) / ray.d_z, t)
+        return t
 
 
 class _ConicBase(_SphericalBase, metaclass=abc.ABCMeta):  # docstring for Conic
@@ -145,28 +145,28 @@ class Conic(_ConicBase):
     def h_r2(self, r2: Ts) -> Ts:
         return _spherical(r2, 1 / self.roc, self.conic)
 
-    # def _solve_t(self, ray: BatchedRay) -> Ts:
-    #     if self.roc.isinf().all():
-    #         return (self.context.z - ray.z) / ray.d_z
-    #
-    #     o_hat = torch.cat([ray.o[..., :2], ray.z.unsqueeze(-1) - self.context.z], -1) / self.roc
-    #     qc_a = 1 + self.conic * ray.d_z.square()  # quadratic coefficient: a
-    #     _1 = o_hat * ray.d
-    #     _1[..., 2] = _1[..., 2] * (self.conic + 1)
-    #     qc_b = _1.sum(-1) - ray.d_z  # quadratic coefficient: b
-    #     _2 = o_hat.square()
-    #     _2[..., 2] = _2[..., 2] * (self.conic + 1)
-    #     qc_c = _2.sum(-1) - 2 * o_hat[..., 2]  # quadratic coefficient: c
-    #     q_sqrt_delta = torch.sqrt(qc_b.square() - qc_a * qc_c)
-    #     q_sqrt_delta = torch.copysign(q_sqrt_delta, ray.d_z)
-    #     t_hat = -(qc_b + q_sqrt_delta) / qc_a
-    #     t = t_hat * self.roc
-    #
-    #     nan_mask = t.isnan()
-    #     if nan_mask.any():
-    #         h_ext_value = self.context.z + self.roc
-    #         t = torch.where(nan_mask, (h_ext_value - ray.z) / ray.d_z, t)
-    #     return t
+    def _solve_t(self, ray: BatchedRay) -> Ts:
+        if self.roc.isinf().all():
+            return (self.context.z - ray.z) / ray.d_z
+
+        o_hat = torch.cat([ray.o[..., :2], ray.z.unsqueeze(-1) - self.context.z], -1) / self.roc
+        qc_a = 1 + self.conic * ray.d_z.square()  # quadratic coefficient: a
+        _1 = o_hat * ray.d
+        _1[..., 2] = _1[..., 2] * (self.conic + 1)
+        qc_b = _1.sum(-1) - ray.d_z  # quadratic coefficient: b
+        _2 = o_hat.square()
+        _2[..., 2] = _2[..., 2] * (self.conic + 1)
+        qc_c = _2.sum(-1) - 2 * o_hat[..., 2]  # quadratic coefficient: c
+        q_sqrt_delta = torch.sqrt(qc_b.square() - qc_a * qc_c)
+        q_sqrt_delta = torch.copysign(q_sqrt_delta, ray.d_z)
+        t_hat = -(qc_b + q_sqrt_delta) / qc_a
+        t = t_hat * self.roc
+
+        nan_mask = t.isnan()
+        if nan_mask.any():
+            h_ext_value = self.context.z + self.roc
+            t = torch.where(nan_mask, (h_ext_value - ray.z) / ray.d_z, t)
+        return t
 
 
 class Standard(Conic):
@@ -206,7 +206,10 @@ class EvenAspherical(_ConicBase):
         newton_config: dict[str, Any] = None
     ):
         super().__init__(roc, conic, material, distance, aperture, newton_config)
-        self.coefficients: nn.Parameter = nn.Parameter(vector(coefficients))  #: Aspherical coefficients.
+        for i, a in enumerate(coefficients):
+            self.register_parameter(f'a{i}', nn.Parameter(scalar(a)))
+        self._n = len(coefficients)
+        # self.coefficients: nn.Parameter = nn.Parameter(vector(coefficients))  #: Aspherical coefficients.
 
     def h_r2(self, r2: Ts) -> Ts:
         a = 0
@@ -220,6 +223,10 @@ class EvenAspherical(_ConicBase):
         for i in range(self.coefficients.numel(), 0, -1):
             a_der = a_der * r2 + self.coefficients[i - 1] * i
         return s_der + a_der
+
+    @property
+    def coefficients(self):
+        return torch.stack([getattr(self, f'a{i}') for i in range(self._n)])
 
     @property
     def even_aspherical_items(self) -> int:
