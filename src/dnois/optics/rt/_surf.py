@@ -587,6 +587,8 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
 
 
 class PlanarSurface(Surface):
+    def __init__(self, material: mt.Material | str, distance: Scalar, aperture: Aperture):
+        super().__init__(material, distance, aperture, None)
 
     def h(self, x: Ts, y: Ts) -> Ts:
         return self.new_zeros(torch.broadcast_shapes(x.shape, y.shape))
@@ -615,7 +617,7 @@ class PlanarSurface(Surface):
 
 class Stop(PlanarSurface):
     def __init__(self, distance: Scalar, aperture: Aperture, move_ray: bool = True):
-        super().__init__('vacuum', distance, aperture, None)
+        super().__init__('vacuum', distance, aperture)
         self._move_ray = move_ray
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:

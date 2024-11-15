@@ -181,7 +181,7 @@ def broadcastable(*tensors_or_shapes: Sequence[int] | Ts) -> bool:
     :rtype: bool
     """
     is_tensor = all(torch.is_tensor(x) for x in tensors_or_shapes)
-    is_shape = all(torch.is_tensor(x) for x in tensors_or_shapes)
+    is_shape = all(isinstance(x, Sequence) for x in tensors_or_shapes)
     if not is_tensor and not is_shape:
         raise TypeError(f'Arguments of {broadcastable.__name__} must be all tensors or all shapes, '
                         f'but got types {[type(x) for x in tensors_or_shapes]}')

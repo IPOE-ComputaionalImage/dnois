@@ -8,7 +8,7 @@ import torch
 from . import surf
 from .ray import BatchedRay
 from ..system import RenderingOptics, Pinhole
-from ... import scene as _sc, base, utils, fourier
+from ... import scene as _sc, base, utils, fourier, torch as _t
 from ...base import typing
 from ...base.typing import (
     Ts, Any, IO, Size2d, Vector, FovSeg, SclOrVec, Scalar, Self, PsfCenter,
@@ -224,7 +224,8 @@ class SequentialRayTracing(RenderingOptics):
         depth = scalar(depth, dtype=self.dtype, device=self.device)
         z = self.obj2lens_z(depth)
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
-        points = self.surfaces.first.sample(self.sampling_mode, *self.sampling_args)  # N_spp x 3
+        points = self.surfaces.first.sample(self._default_cfg['sampling_mode'],
+                                            *self._default_cfg['sampling_args'])  # N_spp x 3
         d, _ = _make_direction(points, o, True)
         wl = self.wl.reshape(-1, 1)
         ray = BatchedRay(points, d, wl)  # N_wl x N_spp
@@ -430,7 +431,7 @@ class SequentialRayTracing(RenderingOptics):
     # ===========================
 
     @classmethod
-    def from_json(#TODO
+    def from_json(  # TODO
         cls, *,
         path: Any = None,
         file: IO = None,
@@ -459,7 +460,7 @@ class SequentialRayTracing(RenderingOptics):
         return cls.from_pyds(info)
 
     @classmethod
-    def from_pyds(cls, info: dict[str, Any]) -> 'SequentialRayTracing':#TODO
+    def from_pyds(cls, info: dict[str, Any]) -> 'SequentialRayTracing':  # TODO
         # surfaces
         sl = surf.SurfaceList([surf.build_surface(cfg) for cfg in info['surfaces']], info['environment_material'])
 
@@ -732,9 +733,9 @@ class SequentialRayTracing(RenderingOptics):
         sampling_args: Any = None,
     ) -> Ts:
         if sampling_mode is None:
-            sampling_mode = self.sampling_mode
+            sampling_mode = self._get_cfg('sampling_mode')
         if sampling_args is None:
-            sampling_args = self.sampling_args
+            sampling_args = self._get_cfg('sampling_args')
         sampled = self.surfaces.first.sample(sampling_mode, *sampling_args)  # N_spp x 3
         n_spp = sampled.size(0)
         d, _ = _make_direction(sampled, self.obj2lens(origins).unsqueeze(-2))  # ... x N_spp x 3
@@ -766,11 +767,10 @@ class SequentialRayTracing(RenderingOptics):
 
         psf = self.new_zeros(in_region.shape[:-1] + (size[0] + 2, size[1] + 2))  # ... x N_wl x H x W
         mask = out_ray.valid & in_region
-        pre_idx = [torch.arange(dim_size, device=self.device) for dim_size in in_region.shape[:-1]]
-        for i in range(len(pre_idx)):
-            idx_shape = [1 for _ in range(in_region.ndim)]
-            idx_shape[i] = -1
-            pre_idx[i] = pre_idx[i].view(idx_shape)
+        pre_idx = [
+            _t.as1d(torch.arange(dim_size, device=self.device), in_region.ndim, i)
+            for i, dim_size in enumerate(in_region.shape[:-1])
+        ]
         psf.index_put_(pre_idx + [r_as, c_as], torch.where(mask, w_c * w_r, 0), True)  # top left
         psf.index_put_(pre_idx + [r_a, c_as], torch.where(mask, w_c * iw_r, 0), True)  # bottom left
         psf.index_put_(pre_idx + [r_as, c_a], torch.where(mask, iw_c * w_r, 0), True)  # top right
@@ -778,6 +778,7 @@ class SequentialRayTracing(RenderingOptics):
         psf = psf[..., :-2, :-2] / n_spp
 
         psf = psf.flip((-2, -1))
+        psf = psf / psf.sum((-2, -1), True)
         return psf
 
     # This method is adapted from
@@ -838,6 +839,7 @@ class SequentialRayTracing(RenderingOptics):
         psf_center: PsfCenter,
         samples: int = DEFAULT_SAMPLES,
     ) -> Ts:
+        # This method is subject to change
         if psf_center != 'chief':
             raise ValueError(f'Unsupported PSF center type for wavefront PSF: {psf_center}')
 
@@ -845,75 +847,71 @@ class SequentialRayTracing(RenderingOptics):
         ref_idx = self.surfaces.mt_tail.n(ray.wl, 'm')
         opd = chief_ray.march(-rs_roc, ref_idx).opl - ray.opl  # ... x N_wl x N_spp
         opd[~ray.valid] = float('nan')
-        wfe = opd * base.wave_vec(wl.unsqueeze(-1))
+        phase = opd * base.wave_vec(wl.unsqueeze(-1))
 
-        spp = wfe.size(-1)
+        spp = phase.size(-1)
         grid_size = int(math.sqrt(spp))
-        # wavefront map in lens' coordinate system
-        wfe = wfe.reshape(wfe.shape[:-1] + (grid_size, grid_size))  # ... x N_wl x samples x samples
-        ep_field = base.expi(wfe * (2 * torch.pi))
-        # ep_field[wfe.isnan()] = 0
-        ep_field = torch.where(wfe.isnan(), torch.zeros_like(ep_field), ep_field)
-        ep_field = ep_field.flip(-2)  # field on exit pupil in camera's coordinate system
+        # ... x N_wl x samples x samples, in lens' coordinate system
+        phase = phase.reshape(phase.shape[:-1] + (grid_size, grid_size))
+        phase = phase.flip(-2)  # phase on exit pupil in camera's coordinate system
 
+        # TODO: wfe_u and wfe_v are assumed to be uniform in current code, enabling direct bilinear interpolation
         # ... x N_wl x samples x samples
-        wfe_x = ray.x.reshape(ray.x.shape[:-1] + (grid_size, grid_size))
-        wfe_y = ray.y.reshape(ray.y.shape[:-1] + (grid_size, grid_size))
-        wfe_x, wfe_y = wfe_x.mean(-2), wfe_y.mean(-1)  # ... x N_wl x samples
+        wfe_u = ray.x.reshape(ray.x.shape[:-1] + (grid_size, grid_size))
+        wfe_v = ray.y.reshape(ray.y.shape[:-1] + (grid_size, grid_size))
+        u_mean, v_mean = wfe_u.nanmean(-2), wfe_v.nanmean(-1)  # ... x N_wl x samples
         # ... x N_wl
-        du, dv = (wfe_x.amax(-1) - wfe_x.amin(-1)) / grid_size, (wfe_y.amax(-1) - wfe_y.amin(-1)) / grid_size
-        scale = exit_pupil_distance * wl
-        dx, dy = scale / (grid_size * du), scale / (grid_size * dv)
+        du, dv = (u_mean.amax(-1) - u_mean.amin(-1)) / grid_size, (v_mean.amax(-1) - v_mean.amin(-1)) / grid_size
+        scale = exit_pupil_distance * wl  # ... x N_wl
 
-        # ... x N_wl
-        ratio_x, ratio_y = torch.ceil(self.pixel_size[1] / dx), torch.ceil(self.pixel_size[0] / dy)
-        nh = int((scale / dv * ratio_y / self.pixel_size[0]).max().round().item())
-        nw = int((scale / du * ratio_x / self.pixel_size[1]).max().round().item())
-        ep_field = utils.resize(ep_field, (nh, nw))
+        # all: ... x N_wl
+        factor_x = grid_size * du * self.pixel_size[1] / scale
+        factor_y = grid_size * dv * self.pixel_size[0] / scale
+        factor_x, factor_y = factor_x.max().ceil().int().item(), factor_y.max().ceil().int().item()
+        range_u, range_v = factor_x * scale / self.pixel_size[1], factor_y * scale / self.pixel_size[0]
+        new_u_num, new_v_num = range_u / du, range_v / dv
+        new_u_num, new_v_num = new_u_num.mean().round().int().item(), new_v_num.mean().round().int().item()
+        du2, dv2 = range_u / new_u_num, range_v / new_v_num
+
+        # bilinear interpolation
+        new_v, new_u = utils.sym_grid(
+            2, (new_v_num, new_u_num), (dv2, du2), True, dtype=self.dtype, device=self.device,
+        )  # ... x N_wl x MH x MW
+        new_r = new_v / dv[..., None, None] + (grid_size - 1) / 2
+        new_c = new_u / du[..., None, None] + (grid_size - 1) / 2
+        upper_r, left_c = new_r.floor().int(), new_c.floor().int()
+        lower_r, right_c = upper_r + 1, left_c + 1
+        valid_r1, valid_r2 = upper_r.clamp(0, grid_size - 1), lower_r.clamp(0, grid_size - 1)
+        valid_c1, valid_c2 = left_c.clamp(0, grid_size - 1), right_c.clamp(0, grid_size - 1)
+        _r_vec = torch.stack([lower_r - new_r, new_r - upper_r], -1).unsqueeze(-2)  # ... x N_wl x MH x MW x 1 x 2
+        _c_vec = torch.stack([right_c - new_c, new_c - left_c], -1).unsqueeze(-1)  # ... x N_wl x MH x MW x 2 x 1
+        pre_idx = [torch.arange(dim_size, device=self.device) for dim_size in phase.shape[:-2]]
+        pre_idx = [_t.as1d(idx, len(pre_idx) + 2, i) for i, idx in enumerate(pre_idx)]
+        _mat = torch.stack([
+            torch.stack([phase[*pre_idx, valid_r1, valid_c1], phase[*pre_idx, valid_r1, valid_c2]], -1),
+            torch.stack([phase[*pre_idx, valid_r2, valid_c1], phase[*pre_idx, valid_r2, valid_c2]], -1),
+        ], -2)  # ... x N_wl x MH x MW x 2 x 2
+        interp_phase = _r_vec @ _mat @ _c_vec
+        interp_phase = interp_phase.squeeze(-1).squeeze(-1)  # ... x N_wl x MH x MW
+        interp_phase[
+            (upper_r != valid_r1) | (lower_r != valid_r2) | (left_c != valid_c1) | (right_c != valid_c2)
+            ] = float('nan')  # ... x N_wl x MH x MW
+
+        ep_field = base.expi(interp_phase)
+        ep_field[interp_phase.isnan()] = 0.
 
         psf = base.abs2(fourier.ft2(ep_field))  # ... x N_wl x samples x samples
 
-        ndx, ndy = scale / (psf.size(-1) * du), scale / (psf.size(-2) * dv)
-        ratio_x, ratio_y = torch.round(self.pixel_size[1] / ndx).int(), torch.round(self.pixel_size[0] / ndy).int()
-        if ratio_x.eq(1).all() and ratio_y.eq(1).all():
+        if factor_x == 1 and factor_y == 1:
             psf = utils.resize(psf, size)
         else:
-            if ratio_x.float().std().ne(0).any() or ratio_y.float().std().ne(0).any():
-                print(f'{ratio_x=}, {ratio_y=}')
-                print(f'{du=}, {dv=}')
-                print(f'{dx=}, {dy=}')
-                print(f'{nh=}, {nw=}')
-                raise RuntimeError()
-            ratio_x, ratio_y = ratio_x.view(-1)[0].item(), ratio_y.view(-1)[0].item()
-            psf = utils.resize(psf, (size[0] * ratio_y, size[1] * ratio_x))
+            psf = utils.resize(psf, (size[0] * factor_y, size[1] * factor_x))
             slices = [[
-                psf[..., i::ratio_y, j::ratio_x] for j in range(ratio_x)
-            ] for i in range(ratio_y)]
-            psf = sum([sum(slc) for slc in slices]) / (ratio_x * ratio_y)
+                psf[..., i::factor_y, j::factor_x] for j in range(factor_x)
+            ] for i in range(factor_y)]
+            psf = sum([sum(slc) for slc in slices]) / (factor_x * factor_y)
 
         psf = psf / psf.sum((-2, -1), True)
-
-        # r, c = torch.meshgrid(
-        #     torch.arange(size[0], device=self.device), torch.arange(size[1], device=self.device), indexing='ij'
-        # )  # H x W
-        # # ... x N_wl x H x W
-        # r, c = r - (size[0] - 1) / 2, c - (size[1] - 1) / 2
-        # r, c = r * self.pixel_size[0] / dy[..., None, None], c * self.pixel_size[1] / dx[..., None, None]
-        # r, c = r + (grid_size - 1) / 2, c + (grid_size - 1) / 2  # coordinate of PSF pixels in original psf
-        # ir, ic = r.floor().int(), c.floor().int()
-        # irpp, icpp = ir + 1, ic + 1
-        # pre_idx = [torch.arange(dim_size, device=self.device) for dim_size in psf.shape[:-2]]
-        # pre_idx = [base.extend_1d(idx, len(pre_idx) + 2, i) for i, idx in enumerate(pre_idx)]
-        # bilinear_mat = torch.stack([
-        #     torch.stack([psf[*pre_idx, ir, ic], psf[*pre_idx, ir, icpp]], -1),  # ... x N_wl x H x W x 2
-        #     torch.stack([psf[*pre_idx, irpp, ic], psf[*pre_idx, irpp, icpp]], -1)  # ... x N_wl x H x W x 2
-        # ], -1)  # ... x N_wl x H x W x 2 x 2
-        # bilinear_r = torch.stack([irpp - r, r - ir], -1).unsqueeze(-2)  # ... x N_wl x H x W x 1 x 2
-        # bilinear_c = torch.stack([icpp - c, c - ic], -1).unsqueeze(-1)  # ... x N_wl x H x W x 2 x 1
-        # bilinear_psf = bilinear_r @ bilinear_mat @ bilinear_c  # ... x N_wl x H x W x 1 x 1
-        # bilinear_psf = bilinear_psf.squeeze(-1).squeeze(-1)  # ... x N_wl x H x W
-        #
-        # psf = bilinear_psf / bilinear_psf.sum((-2, -1), True)
         return psf
 
     def _get_cfg(self, name: str) -> Any:

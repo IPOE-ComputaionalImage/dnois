@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dnois"
+version = "0.0.1"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "torch",
+]
+authors = [
+    { name = "Jiaqi Guo", email = "gjq@tongji.edu.cn" }
+]
+description = "Differentiable Numerical Optical Imaging Simulation"
+readme = "README.md"
+license = { file = "LICENSE" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["dnois.optics.doe*"]

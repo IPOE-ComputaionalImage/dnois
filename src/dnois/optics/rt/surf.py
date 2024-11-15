@@ -6,13 +6,14 @@ from torch import nn
 from . import _surf
 from ._surf import *
 from ... import mt, base
-from ...base.typing import Any, Ts, Scalar, Vector, scalar, vector, pair
+from ...base.typing import Any, Ts, Scalar, Vector, scalar, pair
 
 __all__ = [
     'build_surface',
 
     'Conic',
     'EvenAspherical',
+    'Fresnel',
     'PlanarPhase',
     'Spherical',
     'Standard',
@@ -328,6 +329,55 @@ class PlanarPhase(PlanarSurface):
     @property
     def cell_size(self) -> tuple[float, float]:
         return 2 * self.size[0] / (self.phase.size(0) - 1), 2 * self.size[1] / (self.phase.size(1) - 1)
+
+
+class Fresnel(PlanarSurface):
+    def __init__(
+        self, roc: Scalar,
+        conic: Scalar,
+        coefficients: Vector,
+        material: mt.Material | str,
+        distance: Scalar,
+        aperture: Aperture | float = None,
+    ):
+        if aperture is None:
+            aperture = float('inf')
+        if isinstance(aperture, float):
+            aperture = CircularAperture(aperture)
+
+        super().__init__(material, distance, aperture)
+        self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
+        self.conic: nn.Parameter = nn.Parameter(scalar(conic))  #: Conic coefficient.
+        for i, a in enumerate(coefficients):
+            self.register_parameter(f'a{i}', nn.Parameter(scalar(a)))
+        self._n = len(coefficients)
+
+    def normal(self, x: Ts, y: Ts, curved: bool = True) -> Ts:
+        if not curved:
+            return super().normal(x, y)
+
+        r2 = x.square() + y.square()
+        lim2 = self.geo_radius.square()
+
+        s_der = _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
+        a_der = 0
+        for i in range(self.coefficients.numel(), 0, -1):
+            a_der = a_der * r2 + self.coefficients[i - 1] * i
+        _der = (s_der + a_der) * 2
+        phpx, phpy = _der * x, _der * y
+        if not lim2.isinf().all():
+            mask = r2 <= lim2
+            phpx, phpy = torch.where(mask, phpx, 0), torch.where(mask, phpy, 0)
+        f_grad = torch.stack((-phpx, -phpy, torch.ones_like(phpx)), dim=-1)
+        return f_grad / f_grad.norm(2, -1, True)
+
+    @property
+    def coefficients(self):
+        return torch.stack([getattr(self, f'a{i}') for i in range(self._n)])
+
+    @property
+    def geo_radius(self):
+        return self.roc
 
 
 def build_surface(surface_config: dict[str, Any]) -> CircularSurface:
