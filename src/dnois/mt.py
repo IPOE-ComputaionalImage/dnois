@@ -17,12 +17,14 @@ import abc
 
 import torch
 
+from . import utils
 from .base import convert
 from .base.typing import Numeric, Union, cast
 
 __all__ = [
     'vacuum',
 
+    'dispersion_types',
     'get',
     'is_available',
     'list_all',
@@ -60,8 +62,16 @@ class Material(metaclass=abc.ABCMeta):
     :param str default_unit: Default unit for wavelength.
     """
     __slots__ = ('name', 'min_wl', 'max_wl', 'default_unit')
+    _forbidden_name = ['', 'None', 'none', 'null']
 
-    def __init__(self, name: str, min_wl: float = None, max_wl: float = None, default_unit: str = 'm'):
+    def __init__(self, name: str, min_wl: float = None, max_wl: float = None, default_unit: str = 'um'):
+        if name in self._forbidden_name:
+            raise ValueError(f'Material name cannot be {name}')
+        if min_wl is not None and min_wl < 0 or max_wl is not None and max_wl < 0:
+            raise ValueError(f'Limits of wavelength cannot be negative, but got {min_wl} and {max_wl}')
+        if min_wl is not None and max_wl is not None and max_wl < min_wl:
+            raise ValueError(f'Maximum wavelength ({max_wl}) cannot be smaller than minimum wavelength ({min_wl})')
+
         #: Name of the material.
         self.name = name
         #: Minimum wavelength valid for the material.
@@ -100,7 +110,7 @@ class Material(metaclass=abc.ABCMeta):
             wl = convert(wl, unit, self.default_unit)
 
         m1, m2 = (wl.min().item(), wl.max().item()) if torch.is_tensor(wl) else (wl, wl)
-        if m1 < self.min_wl * (1 - 1e-6) or m2 > self.max_wl * (1 + 1e-6):
+        if m1 < self.min_wl or m2 > self.max_wl:
             raise ValueError(
                 f'Unsupported wavelength for material \'{self.name}\': '
                 f'{wl}(unit: {unit or self.default_unit})'
@@ -124,7 +134,7 @@ class Constant(Material):
         n: float,
         min_wl: float = None,
         max_wl: float = None,
-        default_unit: str = 'm'
+        default_unit: str = 'um'
     ):
         super().__init__(name, min_wl, max_wl, default_unit)
         self.refractive_index: float = n  #: Refractive index.
@@ -197,6 +207,11 @@ class Schott(Material):
             raise ValueError(f'Number of coefficients in Schott formula must be 6.')
         self.coefficients = coefficients  #: The six coefficients in Schott formula.
 
+    def __getattr__(self, name: str):
+        if len(name) == 2 and name[0] == 'a' and name[1].isdigit():
+            return self.coefficients[int(name[1]) - 1]
+        return super().__getattribute__(name)
+
     def n(self, wl: Numeric, unit: str = None) -> Numeric:
         wl = self._validate(wl, unit)
         iw2 = 1 / wl ** 2
@@ -222,9 +237,14 @@ class _Sellmeier(Material):
         super().__init__(name, min_wl, max_wl, default_unit)
 
         if len(ks) != self._n_terms or len(ls) != self._n_terms:
-            raise ValueError(f'Numbers of K and L coefficients should be equal to {self._n_terms}.')
+            raise ValueError(f'Numbers of K and L coefficients should be {self._n_terms}.')
         self.ks = ks  #: The coefficients :math:`K_i` s in Sellmeier{num} formula.
         self.ls = ls  #: The coefficients :math:`L_i` s in Sellmeier{num} formula.
+
+    def __getattr__(self, name: str):
+        if len(name) == 2 and (name.startswith('k') or name.startswith('l')) and name[1].isdigit():
+            return getattr(self, f'{name[0]}s')[int(name[1]) - 1]
+        return super().__getattribute__(name)
 
     def n(self, wl: Numeric, unit: str = None) -> Numeric:
         wl = self._validate(wl, unit)
@@ -370,6 +390,11 @@ class Herzberger(Material):
             raise ValueError(f'Number of coefficients in Herzberger formula must be 6.')
         self.coefficients = coefficients  #: The six coefficients in Herzberger formula.
 
+    def __getattr__(self, name: str):
+        if len(name) == 2 and name[0] == 'a' and name[1].isdigit():
+            return self.coefficients[int(name[1]) - 1]
+        return super().__getattribute__(name)
+
     def n(self, wl: Numeric, unit: str = None) -> Numeric:
         wl = self._validate(wl, unit)
         w2 = wl ** 2
@@ -418,10 +443,9 @@ class Conrady(Material):
                 f'B={self.b:.{precision}f}')
 
 
-vacuum: Constant = Constant('vacuum', 1.)  #: Vacuum.
-_lib = {
-    'vacuum': vacuum,
-}
+vacuum: Constant = Constant('vacuum', 1.)  #: Vacuum. It has constant refractive index 1.
+_builtins: list[Material] = [vacuum]
+_lib = {m.name: m for m in _builtins}
 
 
 def get(name: str, default_none: bool = False) -> Union[Material, None]:
@@ -504,3 +528,29 @@ def remove(name: str, ignore_if_absent: bool = False):
         del _lib[name]
     elif not ignore_if_absent:
         raise KeyError(f'Unknown material: {name}')
+
+
+def update(material: Material):
+    """
+    Update a registered material.
+
+    :param Material material: The new material instance.
+    """
+    remove(material.name, ignore_if_absent=True)
+    register(material)
+
+
+def dispersion_types(name_only: bool = False) -> list[type[Material]] | list[str]:
+    """
+    Returns a list of accessible subclasses of :class:`Material` in lexicographic order.
+    This can be used to recognize material types supported by dnois.
+
+    :param bool name_only: If ``True``, returns class names, otherwise returns class objects.
+    :return: A list of subclasses of :class:`.Material`.
+    :rtype: list[type[Material]]
+    """
+    sub_list = utils.subclasses(Material)
+    if name_only:
+        return [sub.__name__ for sub in sub_list]
+    else:
+        return cast(list, sub_list)

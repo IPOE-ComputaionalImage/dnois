@@ -18,13 +18,15 @@ __all__ = [
     'NT_THRESHOLD_STRICT',
     'NT_UPDATE_BOUND',
 
+    'surface_types',
+
     'Aperture',
     'BatchedRay',
     'CircularAperture',
     'CircularStop',
     'CircularSurface',
     'Context',
-    'PlanarSurface',
+    'Planar',
     'Stop',
     'Surface',
     'SurfaceList',
@@ -586,7 +588,7 @@ class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
         return t - self._newton_descent(new_ray, self._f(new_ray))
 
 
-class PlanarSurface(Surface):
+class Planar(Surface):
     def __init__(self, material: mt.Material | str, distance: Scalar, aperture: Aperture):
         super().__init__(material, distance, aperture, None)
 
@@ -615,7 +617,7 @@ class PlanarSurface(Surface):
         return (self.context.z - ray.z) / ray.d_z
 
 
-class Stop(PlanarSurface):
+class Stop(Planar):
     def __init__(self, distance: Scalar, aperture: Aperture, move_ray: bool = True):
         super().__init__('vacuum', distance, aperture)
         self._move_ray = move_ray
@@ -1067,3 +1069,19 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
     def _super_clear(self):
         for idx in range(len(self) - 1, -1, -1):
             super().__delitem__(idx)
+
+
+def surface_types(name_only: bool = False) -> list[type[Surface]] | list[str]:
+    """
+    Returns a list of accessible subclasses of :class:`Surface` in lexicographic order.
+    This can be used to recognize surface types supported by dnois.
+
+    :param bool name_only: If ``True``, returns class names, otherwise returns class objects.
+    :return: A list of subclasses of :class:`Surface`.
+    :rtype: list[type[Surface]] or list[str]
+    """
+    sub_list = utils.subclasses(Surface)
+    if name_only:
+        return [sub.__name__ for sub in sub_list]
+    else:
+        return cast(list, sub_list)

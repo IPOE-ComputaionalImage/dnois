@@ -182,7 +182,7 @@ class EvenAspherical(_ConicBase):
 
     .. math::
 
-        h(x,y)=\hat{h}(r^2)=\frac{cr^2}{1+\sqrt{1-c^2r^2}}+\sum_{i=1}^N a_i r^{2i}
+        h(x,y)=\hat{h}(r^2)=\frac{cr^2}{1+\sqrt{1-(1+k)c^2r^2}}+\sum_{i=1}^N a_i r^{2i}
 
     where :math:`c` is radius of curvature, :math:`k` is conic coefficient
     and :math:`\{a_i\}_{i=1}^N` are even aspherical coefficients.
@@ -208,7 +208,7 @@ class EvenAspherical(_ConicBase):
     ):
         super().__init__(roc, conic, material, distance, aperture, newton_config)
         for i, a in enumerate(coefficients):
-            self.register_parameter(f'a{i}', nn.Parameter(scalar(a)))
+            self.register_parameter(f'a{i + 1}', nn.Parameter(scalar(a)))
         self._n = len(coefficients)
         # self.coefficients: nn.Parameter = nn.Parameter(vector(coefficients))  #: Aspherical coefficients.
 
@@ -221,13 +221,13 @@ class EvenAspherical(_ConicBase):
     def h_derivative_r2(self, r2: Ts) -> Ts:
         s_der = _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
         a_der = 0
-        for i in range(self.coefficients.numel(), 0, -1):
+        for i in range(len(self.coefficients), 0, -1):
             a_der = a_der * r2 + self.coefficients[i - 1] * i
         return s_der + a_der
 
     @property
     def coefficients(self):
-        return torch.stack([getattr(self, f'a{i}') for i in range(self._n)])
+        return [getattr(self, f'a{i + 1}') for i in range(self._n)]
 
     @property
     def even_aspherical_items(self) -> int:
@@ -236,7 +236,7 @@ class EvenAspherical(_ConicBase):
 
         :type: int
         """
-        return self.coefficients.size(0)
+        return len(self.coefficients)
 
 
 def _diff(x: Ts, d: float, dim: int) -> Ts:
@@ -257,7 +257,7 @@ def _coordinate2index(x: Ts, n: int) -> tuple[Ts, Ts]:
     return idx.int().clamp(0, n - 1), x - x_cell
 
 
-class PlanarPhase(PlanarSurface):
+class PlanarPhase(Planar):
     """
     This class is subject to change.
     """
@@ -270,12 +270,11 @@ class PlanarPhase(PlanarSurface):
         distance: Scalar,
         aperture: Aperture = None,
         optimize_phase: bool = True,
-        newton_config: dict[str, Any] = None
     ):
         size = pair(size)
         if aperture is None:
             aperture = CircularAperture(min(size) / 2)
-        super().__init__(material, distance, aperture, newton_config)
+        super().__init__(material, distance, aperture)
 
         if phase.ndim != 2:
             raise base.ShapeError(f'Shape of phase must be 2D, but got {phase.shape}')
@@ -331,7 +330,7 @@ class PlanarPhase(PlanarSurface):
         return 2 * self.size[0] / (self.phase.size(0) - 1), 2 * self.size[1] / (self.phase.size(1) - 1)
 
 
-class Fresnel(PlanarSurface):
+class Fresnel(Planar):
     def __init__(
         self, roc: Scalar,
         conic: Scalar,
@@ -349,7 +348,7 @@ class Fresnel(PlanarSurface):
         self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
         self.conic: nn.Parameter = nn.Parameter(scalar(conic))  #: Conic coefficient.
         for i, a in enumerate(coefficients):
-            self.register_parameter(f'a{i}', nn.Parameter(scalar(a)))
+            self.register_parameter(f'a{i + 1}', nn.Parameter(scalar(a)))
         self._n = len(coefficients)
 
     def normal(self, x: Ts, y: Ts, curved: bool = True) -> Ts:
@@ -361,7 +360,7 @@ class Fresnel(PlanarSurface):
 
         s_der = _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
         a_der = 0
-        for i in range(self.coefficients.numel(), 0, -1):
+        for i in range(len(self.coefficients), 0, -1):
             a_der = a_der * r2 + self.coefficients[i - 1] * i
         _der = (s_der + a_der) * 2
         phpx, phpy = _der * x, _der * y
@@ -373,7 +372,7 @@ class Fresnel(PlanarSurface):
 
     @property
     def coefficients(self):
-        return torch.stack([getattr(self, f'a{i}') for i in range(self._n)])
+        return [getattr(self, f'a{i + 1}') for i in range(self._n)]
 
     @property
     def geo_radius(self):

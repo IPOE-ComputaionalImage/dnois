@@ -777,7 +777,7 @@ class SequentialRayTracing(RenderingOptics):
         psf.index_put_(pre_idx + [r_a, c_a], torch.where(mask, iw_c * iw_r, 0), True)  # bottom right
         psf = psf[..., :-2, :-2] / n_spp
 
-        psf = psf.flip((-2, -1))
+        psf = psf.flip(-1)
         psf = psf / psf.sum((-2, -1), True)
         return psf
 
@@ -844,10 +844,14 @@ class SequentialRayTracing(RenderingOptics):
             raise ValueError(f'Unsupported PSF center type for wavefront PSF: {psf_center}')
 
         chief_ray, ray, rs_roc, exit_pupil_distance = self._trace_opl_with_chief(origins, wl, samples, 'rect')
+        exit_pupil_distance = exit_pupil_distance.detach()  # TODO: bug to fix
+
         ref_idx = self.surfaces.mt_tail.n(ray.wl, 'm')
         opd = chief_ray.march(-rs_roc, ref_idx).opl - ray.opl  # ... x N_wl x N_spp
         opd[~ray.valid] = float('nan')
         phase = opd * base.wave_vec(wl.unsqueeze(-1))
+        if phase.requires_grad:  # TODO: bug to fix
+            phase.register_hook(lambda g: torch.nan_to_num(g, nan=0.))
 
         spp = phase.size(-1)
         grid_size = int(math.sqrt(spp))
@@ -912,6 +916,7 @@ class SequentialRayTracing(RenderingOptics):
             psf = sum([sum(slc) for slc in slices]) / (factor_x * factor_y)
 
         psf = psf / psf.sum((-2, -1), True)
+        psf = psf.flip(-2)
         return psf
 
     def _get_cfg(self, name: str) -> Any:

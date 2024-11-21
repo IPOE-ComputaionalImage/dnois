@@ -19,6 +19,7 @@ Optical surfaces
     :toctree: ../../generated/optics/rt/surf
 
     build_surface
+    surface_types
     Context
     CircularSurface
     Surface
@@ -56,3 +57,4 @@ Ray-tracing-based optical systems
 ***********************************
 Configuration for Newton's method
 ***********************************
+TODO

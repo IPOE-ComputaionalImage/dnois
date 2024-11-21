@@ -43,11 +43,13 @@ Accessing materials
 .. autosummary::
     :toctree: ../generated/mt
 
+    dispersion_types
     get
     is_available
     list_all
     register
     remove
+    update
 
 *****************************
 Others
