@@ -20,8 +20,6 @@ __all__ = [
 ]
 __all__ += _surf.__all__
 
-EDGE_CUTTING: float = 1 - 1e-5
-
 
 def _spherical(r2: Ts, c: Ts, k: Ts = None) -> Ts:  # TODO: optimize
     a = c.square() if k is None else c.square() * (1 + k)
@@ -64,6 +62,10 @@ class _SphericalBase(CircularSurface, metaclass=abc.ABCMeta):  # docstring for S
         super().__init__(material, distance, aperture, newton_config)
         self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
 
+    @property
+    def geo_radius(self) -> Ts:
+        return self.roc
+
 
 class Spherical(_SphericalBase):
     __doc__ = _SphericalBase.__doc__
@@ -73,10 +75,6 @@ class Spherical(_SphericalBase):
 
     def h_derivative_r2(self, r2: Ts) -> Ts:
         return _spherical_der_wrt_r2(r2, 1 / self.roc)
-
-    @property
-    def geo_radius(self) -> Ts:
-        return self.roc * EDGE_CUTTING
 
     def _solve_t(self, ray: BatchedRay) -> Ts:
         ray = ray.norm_d()
@@ -137,7 +135,7 @@ class _ConicBase(_SphericalBase, metaclass=abc.ABCMeta):  # docstring for Conic
         if self.conic.item() <= -1:
             return self.conic.new_tensor(float('inf'))
         else:
-            return self.roc / torch.sqrt(1 + self.conic) * EDGE_CUTTING
+            return self.roc / torch.sqrt(1 + self.conic)
 
 
 class Conic(_ConicBase):
@@ -210,7 +208,6 @@ class EvenAspherical(_ConicBase):
         for i, a in enumerate(coefficients):
             self.register_parameter(f'a{i + 1}', nn.Parameter(scalar(a)))
         self._n = len(coefficients)
-        # self.coefficients: nn.Parameter = nn.Parameter(vector(coefficients))  #: Aspherical coefficients.
 
     def h_r2(self, r2: Ts) -> Ts:
         a = 0
@@ -227,6 +224,13 @@ class EvenAspherical(_ConicBase):
 
     @property
     def coefficients(self):
+        r"""
+        Aspherical coefficients. Note that the element with index ``i``
+        represents coefficient :math:`a_{i+1}`.
+
+        :return: A list containing the coefficients.
+        :rtype: list[torch.nn.Parameter]
+        """
         return [getattr(self, f'a{i + 1}') for i in range(self._n)]
 
     @property
@@ -236,7 +240,7 @@ class EvenAspherical(_ConicBase):
 
         :type: int
         """
-        return len(self.coefficients)
+        return self._n
 
 
 def _diff(x: Ts, d: float, dim: int) -> Ts:
@@ -330,7 +334,15 @@ class PlanarPhase(Planar):
         return 2 * self.size[0] / (self.phase.size(0) - 1), 2 * self.size[1] / (self.phase.size(1) - 1)
 
 
-class Fresnel(Planar):
+class Fresnel(Planar, EvenAspherical):
+    """
+    Fresnel lens surface. It is regarded as a planar surface generally,
+    but refracts rays like a :class:`EvenAspherical` surface. Specifically,
+    when calculating the direction of refractive rays, its normal vector at
+    :math:`(x,y)` is that of a :class:`EvenAspherical` at the same point.
+
+    See :class:`EvenAspherical` for description of parameters.
+    """
     def __init__(
         self, roc: Scalar,
         conic: Scalar,
@@ -339,44 +351,13 @@ class Fresnel(Planar):
         distance: Scalar,
         aperture: Aperture | float = None,
     ):
-        if aperture is None:
-            aperture = float('inf')
-        if isinstance(aperture, float):
-            aperture = CircularAperture(aperture)
-
-        super().__init__(material, distance, aperture)
-        self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
-        self.conic: nn.Parameter = nn.Parameter(scalar(conic))  #: Conic coefficient.
-        for i, a in enumerate(coefficients):
-            self.register_parameter(f'a{i + 1}', nn.Parameter(scalar(a)))
-        self._n = len(coefficients)
+        EvenAspherical.__init__(self, roc, conic, coefficients, material, distance, aperture)
 
     def normal(self, x: Ts, y: Ts, curved: bool = True) -> Ts:
         if not curved:
-            return super().normal(x, y)
-
-        r2 = x.square() + y.square()
-        lim2 = self.geo_radius.square()
-
-        s_der = _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
-        a_der = 0
-        for i in range(len(self.coefficients), 0, -1):
-            a_der = a_der * r2 + self.coefficients[i - 1] * i
-        _der = (s_der + a_der) * 2
-        phpx, phpy = _der * x, _der * y
-        if not lim2.isinf().all():
-            mask = r2 <= lim2
-            phpx, phpy = torch.where(mask, phpx, 0), torch.where(mask, phpy, 0)
-        f_grad = torch.stack((-phpx, -phpy, torch.ones_like(phpx)), dim=-1)
-        return f_grad / f_grad.norm(2, -1, True)
-
-    @property
-    def coefficients(self):
-        return [getattr(self, f'a{i + 1}') for i in range(self._n)]
-
-    @property
-    def geo_radius(self):
-        return self.roc
+            return Planar.normal(self, x, y)
+        else:
+            return EvenAspherical.normal(self, x, y)
 
 
 def build_surface(surface_config: dict[str, Any]) -> CircularSurface:

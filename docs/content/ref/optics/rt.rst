@@ -38,11 +38,15 @@ Specific surface types
 .. autosummary::
     :toctree: ../../generated/optics/rt/surf/types
 
+    CircularStop
     Conic
     EvenAspherical
+    Fresnel
+    Planar
     PlanarPhase
     Spherical
     Standard
+    Stop
 
 ************************************
 Ray-tracing-based optical systems

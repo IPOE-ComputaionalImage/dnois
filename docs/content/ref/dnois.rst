@@ -14,16 +14,6 @@ Physics
     fraunhofer_line
     wave_vec
 
-**********************************
-Mathematics
-**********************************
-.. autosummary::
-    :toctree: ../generated/dnois/mathematics
-
-    abs2
-    expi
-    normalize
-
 *********************************
 Debugging
 *********************************
@@ -51,11 +41,3 @@ Exception classes
     :toctree: ../generated/dnois/exception
 
     ShapeError
-
-*********************************
-Miscellaneous
-*********************************
-.. autosummary::
-    :toctree: ../generated/dnois/misc
-
-    broadcastable

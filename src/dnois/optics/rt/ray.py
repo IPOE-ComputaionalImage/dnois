@@ -4,7 +4,7 @@ import warnings
 
 import torch
 
-from ... import base
+from ... import base, torch as _t
 from ...base.typing import Ts, Self, Sequence, Callable
 
 __all__ = [
@@ -49,7 +49,7 @@ class NoValidRayError(RuntimeError):
 
 # WARNING: do not modify the tensors in this class in an in-place manner
 # TODO: deal with floating-point error
-class BatchedRay(base.TensorContainerMixIn):
+class BatchedRay(_t.TensorContainerMixIn):
     r"""
     A class representing a batch of rays, which means both the origin and direction are
     tensors with the last dimension as 3, representing three coordinates x, y and z.
@@ -605,7 +605,7 @@ class BatchedRay(base.TensorContainerMixIn):
                     self._ts[k] = result
 
     def _check_shape(self, shape: tuple[int, ...], name: str):
-        if not base.broadcastable(shape, self.shape):
+        if not _t.broadcastable(shape, self.shape):
             raise base.ShapeError(f'Trying to assign a tensor with incompatible shape {shape} '
                                   f'to {name}, while shape of rays is {self.shape}')
 

@@ -110,10 +110,10 @@ class Material(metaclass=abc.ABCMeta):
             wl = convert(wl, unit, self.default_unit)
 
         m1, m2 = (wl.min().item(), wl.max().item()) if torch.is_tensor(wl) else (wl, wl)
-        if m1 < self.min_wl or m2 > self.max_wl:
+        if m1 < self.min_wl * (1 - 1e-6) or m2 > self.max_wl * (1 + 1e-6):
             raise ValueError(
                 f'Unsupported wavelength for material \'{self.name}\': '
-                f'{wl}(unit: {unit or self.default_unit})'
+                f'{wl}(unit: {self.default_unit})'
             )
         else:
             return wl

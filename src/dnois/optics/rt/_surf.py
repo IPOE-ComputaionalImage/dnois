@@ -5,11 +5,12 @@ import torch
 from torch import nn
 
 from .ray import BatchedRay
-from ... import mt, base, utils
+from ... import mt, utils, torch as _t
 from ...base.typing import (
     Sequence, Ts, Any, Callable, Scalar, Self, Size2d,
     scalar, size2d, cast
 )
+from ...torch import ParamTransformModule
 
 __all__ = [
     'NT_EPSILON',
@@ -39,7 +40,7 @@ NT_UPDATE_BOUND: float = 5.
 NT_EPSILON: float = 1e-9
 
 SAMPLE_LIMIT: float = 1 - 1e-4
-EDGE_CUTTING: float = 1 - 1e-5
+EDGE_CUTTING: float = 1 - 1e-6
 
 
 def _dist_transform(x: Ts, curve: Callable[[Ts], Ts]) -> Ts:
@@ -107,7 +108,7 @@ class Context:
             'This may be because the surface has been removed from the lens group.')
 
 
-class Aperture(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
+class Aperture(_t.TensorContainerMixIn, ParamTransformModule, metaclass=abc.ABCMeta):
     """
     Base class for aperture shapes. Aperture refers to the region on a surface
     where rays can transmit. The region outside the aperture is assumed to be
@@ -264,7 +265,7 @@ class CircularAperture(Aperture):
         """
         n = size2d(n)
         zero = torch.tensor([0.], dtype=self.dtype, device=self.device)
-        r = torch.linspace(0, self.radius * EDGE_CUTTING, n[0] + 1, device=self.device, dtype=self.dtype)
+        r = torch.linspace(0, self.radius * SAMPLE_LIMIT, n[0] + 1, device=self.device, dtype=self.dtype)
         r = [r[i].expand(i * n[1]) for i in range(1, n[0] + 1)]  # n[1]*n[0]*(n[0]+1)/2
         r = torch.cat([zero] + r)  # n[1]*n[0]*(n[0]+1)/2+1
         t = [
@@ -296,7 +297,7 @@ class CircularAperture(Aperture):
         return self.radius
 
 
-class Surface(base.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
+class Surface(_t.TensorContainerMixIn, ParamTransformModule, metaclass=abc.ABCMeta):
     r"""
     Base class for optical surfaces in a group of lens.
     The position of a surface in a lens group is specified by a single z-coordinate,
@@ -648,12 +649,6 @@ class Stop(Planar):
         pass
 
 
-class CircularStop(Stop):
-    def __init__(self, distance: Scalar, radius: Scalar):
-        aperture = CircularAperture(radius)
-        super().__init__(distance, aperture)
-
-
 class CircularSurface(Surface, metaclass=abc.ABCMeta):
     r"""
     Derived class of :py:class:`~Surface` for optical surfaces
@@ -735,7 +730,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         return self.h_r2(x.square() + y.square())
 
     def h_extended(self, x: Ts, y: Ts) -> Ts:
-        return self.h_extended_r2(x.square() + y.square())
+        return self.h_r2_extended(x.square() + y.square())
 
     def h_grad_extended(self, x: Ts, y: Ts, r2: Ts = None) -> tuple[Ts, Ts]:
         r"""
@@ -759,7 +754,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         mask = r2 <= lim2
         return torch.where(mask, phpx, 0), torch.where(mask, phpy, 0)
 
-    def h_extended_r2(self, r2: Ts) -> Ts:
+    def h_r2_extended(self, r2: Ts) -> Ts:
         r"""
         Computes extended version of :math:`\hat{h}(r^2)`.
         See :py:meth:`~h_r2` and :py:meth:`~h_extended`.
@@ -767,7 +762,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         lim2 = self.geo_radius.square()
         if lim2.isinf().all():
             return self.h_r2(r2)
-        return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2))
+        return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2*EDGE_CUTTING))
 
     @property
     def geo_radius(self) -> Ts:
@@ -780,7 +775,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         return self.new_tensor(float('inf'))
 
     def _f(self, ray: BatchedRay) -> Ts:
-        return self.h_extended_r2(ray.r2) + self.context.z - ray.z
+        return self.h_r2_extended(ray.r2) + self.context.z - ray.z
 
     def _f_grad(self, ray: BatchedRay) -> Ts:
         phpx, phpy = self.h_grad_extended(ray.x, ray.y, ray.r2)
@@ -791,6 +786,18 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
     #     descent = f_value / (derivative_value + self._nt_epsilon)
     #     descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
     #     return descent
+
+
+class CircularStop(Stop, CircularSurface):
+    def __init__(self, distance: Scalar, radius: Scalar):
+        aperture = CircularAperture(radius)
+        super().__init__(distance, aperture)
+
+    def h_derivative_r2(self, r2: Ts) -> Ts:
+        return torch.zeros_like(r2)
+
+    def h_r2(self, r2: Ts) -> Ts:
+        return torch.zeros_like(r2)
 
 
 class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):

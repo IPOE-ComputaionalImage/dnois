@@ -818,17 +818,17 @@ class SequentialRayTracing(RenderingOptics):
         phase = (r_proj + ray.opl[..., None, None, :]) * wave_vec
 
         if oblique:
-            r_unit = base.normalize(rs2grid_points)  # ... x N_wl x H x W x N_spp x 3
+            r_unit = _t.normalize(rs2grid_points)  # ... x N_wl x H x W x N_spp x 3
             rs_normal = ray.o - chief_ray.o
-            rs_normal = base.normalize(rs_normal)  # ... x N_wl x N_spp x 3
+            rs_normal = _t.normalize(rs_normal)  # ... x N_wl x N_spp x 3
             cosine_prop = torch.sum(rs_normal[..., None, None, :, :] * r_unit, -1)
             cosine_rs = torch.sum(rs_normal * ray.d, -1)  # N_fov x N_D x N_wl x N_spp
             obliquity = (cosine_rs[..., None, None, :] + cosine_prop) / 2
             field = torch.polar(obliquity, phase)
         else:
-            field = base.expi(phase)
+            field = _t.expi(phase)
         field = field.sum(-1)  # N_fov x N_D x N_wl x H x W
-        psf = base.abs2(field)
+        psf = _t.abs2(field)
         return psf / psf.sum((-2, -1), True)  # N_fov x N_D x N_wl x H x W
 
     def _psf_from_wavefront(
@@ -901,10 +901,10 @@ class SequentialRayTracing(RenderingOptics):
             (upper_r != valid_r1) | (lower_r != valid_r2) | (left_c != valid_c1) | (right_c != valid_c2)
             ] = float('nan')  # ... x N_wl x MH x MW
 
-        ep_field = base.expi(interp_phase)
+        ep_field = _t.expi(interp_phase)
         ep_field[interp_phase.isnan()] = 0.
 
-        psf = base.abs2(fourier.ft2(ep_field))  # ... x N_wl x samples x samples
+        psf = _t.abs2(fourier.ft2(ep_field))  # ... x N_wl x samples x samples
 
         if factor_x == 1 and factor_y == 1:
             psf = utils.resize(psf, size)

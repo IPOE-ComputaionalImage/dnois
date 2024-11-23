@@ -24,11 +24,3 @@ Image manipulation
     partition
     partition_padded
     merge_patches
-
-*********************************
-PyTorch Module
-*********************************
-.. autosummary::
-    :toctree: ../generated/utils/module
-
-    WrapperModule

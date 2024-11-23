@@ -6,8 +6,8 @@ import torch
 from torch import nn
 
 from . import formation
-from .. import scene as _sc, base, utils
-from ..base import ShapeError, TensorContainerMixIn, typing
+from .. import scene as _sc, base, utils, torch as _t
+from ..base import ShapeError, typing
 from ..base.typing import (
     Ts, Size2d, FovSeg, Vector, SclOrVec, Callable,
     size2d, vector, scl_or_vec
@@ -181,7 +181,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         return self.pixel_size[0] * self.pixel_num[0], self.pixel_size[1] * self.pixel_num[1]
 
 
-class RenderingOptics(TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMeta):
+class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMeta):
     """
     Base class for optical systems with optical imaging behavior defined.
     See :doc:`/content/guide/optics/imodel` for details.
