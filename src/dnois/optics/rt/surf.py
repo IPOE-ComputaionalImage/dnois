@@ -343,6 +343,7 @@ class Fresnel(Planar, EvenAspherical):
 
     See :class:`EvenAspherical` for description of parameters.
     """
+
     def __init__(
         self, roc: Scalar,
         conic: Scalar,
@@ -354,10 +355,29 @@ class Fresnel(Planar, EvenAspherical):
         EvenAspherical.__init__(self, roc, conic, coefficients, material, distance, aperture)
 
     def normal(self, x: Ts, y: Ts, curved: bool = True) -> Ts:
+        """
+        Overridden from :class:`Planar` to model refractive behavior of Fresnel surface.
+
+        :param Tensor x: Sames as that in :meth:`Planar.normal`.
+        :param Tensor y: Sames as that in :meth:`Planar.normal`.
+        :param bool curved: If ``True``, returns normal vector of latent curved surface.
+            Otherwise, this method acts identically to :meth:`Planar.normal`.
+        :return: Normal vector, a tensor whose last dimension is 3.
+        :rtype: Tensor
+        """
         if not curved:
-            return Planar.normal(self, x, y)
-        else:
-            return EvenAspherical.normal(self, x, y)
+            return super().normal(x, y)
+
+        r2 = x.square() + y.square()
+        lim2 = self.geo_radius.square()
+
+        _der = EvenAspherical.h_derivative_r2(self, r2) * 2
+        phpx, phpy = _der * x, _der * y
+        if not lim2.isinf().all():
+            mask = r2 <= lim2
+            phpx, phpy = torch.where(mask, phpx, 0), torch.where(mask, phpy, 0)
+        f_grad = torch.stack((-phpx, -phpy, torch.ones_like(phpx)), dim=-1)
+        return f_grad / f_grad.norm(2, -1, True)
 
 
 def build_surface(surface_config: dict[str, Any]) -> CircularSurface:

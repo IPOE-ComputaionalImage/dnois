@@ -13,7 +13,8 @@ a group of rays can dictate rendering process as well in ray-tracing-based
 systems.
 """
 # from .df import *
+from .formation import *
 # from .rt import *
 from .system import *
 
-from . import df, rt, system
+from . import df, formation, rt, system

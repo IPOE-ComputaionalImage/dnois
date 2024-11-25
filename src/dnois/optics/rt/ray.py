@@ -262,7 +262,7 @@ class BatchedRay(_t.TensorContainerMixIn):
             if _opl:
                 self.opl = self.opl + opl
             if _ph:
-                self.phase = self.phase + base.wave_vec(self.wl) * opl
+                self.phase = self.phase + base.physics.wave_vec(self.wl) * opl
         return self
 
     def march_to(self, z: float | Ts, n: float | Ts = None) -> 'BatchedRay':

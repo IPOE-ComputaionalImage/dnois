@@ -11,8 +11,8 @@ from ..system import RenderingOptics, Pinhole
 from ... import scene as _sc, base, utils, fourier, torch as _t
 from ...base import typing
 from ...base.typing import (
-    Ts, Any, IO, Size2d, Vector, FovSeg, SclOrVec, Scalar, Self, PsfCenter,
-    scalar, size2d
+    Ts, Any, IO, Size2d, Vector, SclOrVec, Scalar, Self, PsfCenter,
+    scalar
 )
 
 __all__ = [
@@ -99,45 +99,26 @@ class SequentialRayTracing(RenderingOptics):
 
         ``wavefront_ft``
             TODO
-    :param psf_size: Number of pixels in PSF in vertical and horizontal directions.
-        Default: 64.
-    :type psf_size: int or tuple[int, int]
     :param str psf_center: The way to determine centers of computed PSFs.
 
-        ``linear``
+        ``'linear'``
             PSFs are centered around ideal image points thus realistic distortion is simulated.
 
-        ``mean``
+        ``'mean'``
             PSFs are centered around their "center of gravity".
 
-        ``chief``
+        ``'chief'``
             PSFs are centered around the intersections of corresponding chief rays and image plane.
-    :param kwargs: Optional keyword arguments:
-
-        .. list-table::
-            :header-rows: 1
-            :align: left
-
-            * - Parameter
-              - Type
-              - Description
-              - Default
-            * - **sampling_mode**
-              - *str*
-              - Mode for sampling rays used in simple incoherent PSF calculation.
-                See :class:`~surf.Surface.sample` for more details.
-              - ``random``
-            * - **sampling_args**
-              - *Any*
-              - Arguments to pass to the sampling method specified by ``sampling_mode``.
-                See :class:`~surf.Surface.sample` for more details.
-              - ``(64, )``
+    :param str sampling_mode: Mode for sampling rays used in simple incoherent PSF calculation.
+        See :class:`~surf.Surface.sample` for more details. Default: ``'random'``.
+    :param Any sampling_args: Arguments to pass to the sampling method specified by ``sampling_mode``.
+        See :class:`~surf.Surface.sample` for more details. Default: ``(64, )``.
+    :param bool vignette: Whether to simulate vignette for ``'simple_incoherent'`` PSF.
+    :param int coherent_tracing_samples: Number of samples in two directions
+        for coherent tracing. Default: 512.
+    :param str coherent_tracing_sampling_pattern: Sampling pattern for coherent tracing.
+        Default: ``'quadrapolar'``.
     """
-    _default_cfg = {
-        'sampling_mode': 'random',
-        'sampling_args': (64,),
-        'vignette': True,
-    }
 
     def __init__(
         self,
@@ -145,34 +126,32 @@ class SequentialRayTracing(RenderingOptics):
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
         image_distance: float = None,
-        wl: Vector = None,
-        fov_segments: FovSeg | Size2d = 'paraxial',
-        depth: SclOrVec | tuple[Ts, Ts] = float('inf'),
-        depth_aware: bool = False,
-        coherent: bool = False,
         psf_type: str = 'simple_incoherent',
-        psf_size: Size2d = 64,
         psf_center: PsfCenter = 'linear',
+        sampling_mode: str = 'random',
+        sampling_args: Any = (64,),
+        vignette: bool = True,
+        coherent_tracing_samples: int = 512,
+        coherent_tracing_sampling_pattern: str = 'quadrapolar',
         **kwargs
     ):
-        if coherent:
-            raise NotImplementedError(f'Coherent {self.__class__.__name__} not implemented yet.')
-
-        super().__init__(
-            pixel_num, pixel_size, image_distance,
-            wl, fov_segments, depth, depth_aware, coherent, psf_size
-        )
+        super().__init__(pixel_num, pixel_size, image_distance, **kwargs)
         self.surfaces: surf.SurfaceList = surfaces  #: Surface list.
-
-        self.psf_type: str = psf_type  #: The way to calculate PSF.
-        self.psf_center: PsfCenter = psf_center  #: The way to determine the center of PSF.
-        self._cfg = kwargs
+        self.psf_type: str = psf_type  #: See :class:`SequentialRayTracing`.
+        self.psf_center: PsfCenter = psf_center  #: See :class:`SequentialRayTracing`.
+        self.sampling_mode: str = sampling_mode  #: See :class:`SequentialRayTracing`.
+        self.sampling_args: Any = sampling_args  #: See :class:`SequentialRayTracing`.
+        self.vignette: bool = vignette  #: See :class:`SequentialRayTracing`.
+        #: See :class:`SequentialRayTracing`.
+        self.coherent_tracing_samples: int = coherent_tracing_samples
+        #: See :class:`SequentialRayTracing`.
+        self.coherent_tracing_sampling_pattern: str = coherent_tracing_sampling_pattern
 
     def pointwise_render(
         self,
         scene: _sc.ImageScene,
         wl: Vector = None,
-        depth: SclOrVec | tuple[Ts, Ts] = None,
+        depth: Vector | tuple[Ts, Ts] = None,
         psf_type: str = None,
         psf_size: Size2d = None,
         psf_center: PsfCenter = None,
@@ -183,12 +162,11 @@ class SequentialRayTracing(RenderingOptics):
 
             This method is subject to change.
         """
-        wl = self._pick_wl(wl)
-        depth = self._pick_depth(depth)
-        psf_type = self.psf_type if psf_type is None else psf_type
-        psf_size = self.psf_size if psf_size is None else size2d(psf_size)
-        psf_center = self.psf_center if psf_center is None else psf_center
-        psf_center = typing.cast(PsfCenter, psf_center)
+        wl = self.pick('wl', wl)
+        depth = self.pick('depth', depth)
+        psf_type = self.pick('psf_type', psf_type)
+        psf_size = self.pick('psf_size', psf_size)
+        psf_center = self.pick('psf_center', psf_center)
 
         if psf_type == 'simple_incoherent':
             return self._pointwise_simple_incoherent(scene, wl, depth, psf_size, psf_center, **kwargs)
@@ -224,8 +202,10 @@ class SequentialRayTracing(RenderingOptics):
         depth = scalar(depth, dtype=self.dtype, device=self.device)
         z = self.obj2lens_z(depth)
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
-        points = self.surfaces.first.sample(self._default_cfg['sampling_mode'],
-                                            *self._default_cfg['sampling_args'])  # N_spp x 3
+        points = self.surfaces.first.sample(
+            self.pick('sampling_mode'),
+            *self.pick('sampling_args')
+        )  # N_spp x 3
         d, _ = _make_direction(points, o, True)
         wl = self.wl.reshape(-1, 1)
         ray = BatchedRay(points, d, wl)  # N_wl x N_spp
@@ -243,7 +223,7 @@ class SequentialRayTracing(RenderingOptics):
 
         return self
 
-    def lens2obj(self, point: Ts) -> Ts:
+    def lens2camera(self, point: Ts) -> Ts:
         """
         Converts coordinates in :ref:`lens' coordinate system <guide_optics_rt_lcs>` to those in
         :ref:`camera's coordinate system <guide_imodel_cameras_coordinate_system>`.
@@ -252,11 +232,11 @@ class SequentialRayTracing(RenderingOptics):
         :return: Coordinates in camera's coordinate system. A tensor with shape ``(..., 3)``.
         :rtype: Tensor
         """
-        typing.check_3d_vector(point, f'point in {self.lens2obj.__qualname__}')
+        typing.check_3d_vector(point, f'point in {self.lens2camera.__qualname__}')
 
         return torch.stack([-point[..., 0], point[..., 1], self.len2obj_z(point[..., 2])], -1)
 
-    def obj2lens(self, point: Ts) -> Ts:
+    def camera2lens(self, point: Ts) -> Ts:
         """
         Converts coordinates in :ref:`camera's coordinate system <guide_imodel_cameras_coordinate_system>`
         into coordinates in :ref:`lens' coordinate system <guide_optics_rt_lcs>`.
@@ -265,11 +245,11 @@ class SequentialRayTracing(RenderingOptics):
         :return: Coordinates in lens' coordinate system. A tensor of shape ``(..., 3)``.
         :rtype: Tensor
         """
-        typing.check_3d_vector(point, f'point in {self.obj2lens.__qualname__}')
+        typing.check_3d_vector(point, f'point in {self.camera2lens.__qualname__}')
 
         return torch.stack([-point[..., 0], point[..., 1], self.obj2lens_z(point[..., 2])], -1)
 
-    def obj_proj(self, point: Ts) -> Ts:
+    def obj_proj_lens(self, point: Ts) -> Ts:
         """
         Returns x and y coordinates in :ref:`lens' coordinate system <guide_optics_rt_lcs>` of perspective projections
         of points in :ref:`camera's coordinate system <guide_imodel_cameras_coordinate_system>`
@@ -287,20 +267,18 @@ class SequentialRayTracing(RenderingOptics):
     def psf(
         self,
         origins: Ts,
-        size: Size2d,
+        size: Size2d = None,
         wl: Vector = None,
         psf_type: str = None,
         psf_center: PsfCenter = None,
         **kwargs
     ) -> Ts:
-        wl = self._pick_wl(wl)
-        psf_type = self.psf_type if psf_type is None else psf_type
-        psf_center = self.psf_center if psf_center is None else psf_center
-        psf_center = typing.cast(PsfCenter, psf_center)
+        size = self.pick('psf_size', size)
+        wl = self.pick('wl', wl)
+        psf_type = self.pick('psf_type', psf_type)
+        psf_center = self.pick('psf_center', psf_center)
 
         typing.check_3d_vector(origins, f'origins in {self.psf.__qualname__}')
-
-        size = size2d(size)
 
         if psf_type == 'simple_incoherent':
             return self._psf_simple_incoherent(origins, size, wl, psf_center, **kwargs)
@@ -329,7 +307,7 @@ class SequentialRayTracing(RenderingOptics):
         if fov is None:
             fov_half = self.reference.fov_half
             fov = [0., fov_half * 0.5 ** 0.5, fov_half]
-        wl = self._pick_wl(wl)
+        wl = self.pick('wl', wl)
         fov = typing.vector(fov, device=self.device, dtype=self.dtype)
         wl = typing.vector(wl, device=self.device, dtype=self.dtype)
 
@@ -363,10 +341,12 @@ class SequentialRayTracing(RenderingOptics):
         self,
         origin: Ts,
         wl: Vector = None,
-        samples: int = DEFAULT_SAMPLES,
-        sampling_pattern: str = 'quadrapolar',
+        coherent_tracing_samples: int = DEFAULT_SAMPLES,
+        coherent_tracing_sampling_pattern: str = 'quadrapolar',
     ) -> tuple[BatchedRay, Ts]:
-        wl = self._pick_wl(wl)
+        wl = self.pick('wl', wl)
+        samples = self.pick('coherent_tracing_samples', coherent_tracing_samples)
+        sampling_pattern = self.pick('coherent_tracing_sampling_pattern', coherent_tracing_sampling_pattern)
 
         chief_ray, ray, rs_roc, exit_pupil_distance = self._trace_opl_with_chief(
             origin, wl, samples, sampling_pattern
@@ -588,7 +568,7 @@ class SequentialRayTracing(RenderingOptics):
         sampling_pattern: str = 'quadrapolar',
     ) -> tuple[BatchedRay, BatchedRay, Ts, Ts]:
         # ... x N_wl x N_spp(1)
-        ray, chief_ray = self._generate_rays(self.obj2lens(origin), wl, samples, sampling_pattern)
+        ray, chief_ray = self._generate_rays(self.camera2lens(origin), wl, samples, sampling_pattern)
 
         ray = self.surfaces(ray)
         chief_ray = self._obj2img(chief_ray)
@@ -650,9 +630,9 @@ class SequentialRayTracing(RenderingOptics):
 
             This method is subject to change.
         """
-        sampling_mode = self._get_cfg('sampling_mode') if sampling_mode is None else sampling_mode
-        sampling_args = self._get_cfg('sampling_args') if sampling_args is None else sampling_args
-        vignette = self._get_cfg('vignette') if vignette is None else vignette
+        sampling_mode = self.pick('sampling_mode', sampling_mode)
+        sampling_args = self.pick('sampling_args', sampling_args)
+        vignette = self.pick('vignette', vignette)
 
         self._check_scene(scene)
         if scene.intrinsic is not None:
@@ -683,7 +663,7 @@ class SequentialRayTracing(RenderingOptics):
         y = torch.linspace(-1, 1, n_h, device=device).unsqueeze(-1)
         y = y * math.tan(rm.fov_half_y)  # H x 1
         o = self.tanfovd2obj(torch.stack(torch.broadcast_tensors(x, y), -1), depth_map)  # B x H x W x 3
-        o = self.obj2lens(o)  # B x H x W x 3
+        o = self.camera2lens(o)  # B x H x W x 3
 
         points = self.surfaces.first.sample(sampling_mode, *sampling_args)  # N_spp x 3
         spp = points.size(0)
@@ -732,13 +712,12 @@ class SequentialRayTracing(RenderingOptics):
         sampling_mode: str = None,
         sampling_args: Any = None,
     ) -> Ts:
-        if sampling_mode is None:
-            sampling_mode = self._get_cfg('sampling_mode')
-        if sampling_args is None:
-            sampling_args = self._get_cfg('sampling_args')
+        sampling_mode = self.pick('sampling_mode', sampling_mode)
+        sampling_args = self.pick('sampling_args', sampling_args)
+
         sampled = self.surfaces.first.sample(sampling_mode, *sampling_args)  # N_spp x 3
         n_spp = sampled.size(0)
-        d, _ = _make_direction(sampled, self.obj2lens(origins).unsqueeze(-2))  # ... x N_spp x 3
+        d, _ = _make_direction(sampled, self.camera2lens(origins).unsqueeze(-2))  # ... x N_spp x 3
         # ... x N_wl x N_spp x 3
         ray = BatchedRay(sampled, d.unsqueeze(-3), wl.unsqueeze(-1))
         ray.norm_d_()
@@ -746,7 +725,7 @@ class SequentialRayTracing(RenderingOptics):
         out_ray = self._obj2img(ray)  # ... x N_wl x N_spp
 
         if psf_center == 'linear':
-            xy_center = self.obj_proj(origins)[..., None, None, :]  # ... x 1 x 1 x 2
+            xy_center = self.obj_proj_lens(origins)[..., None, None, :]  # ... x 1 x 1 x 2
         elif psf_center == 'mean':
             xy_center = out_ray.o[..., :2]  # ... x N_wl x N_spp x 2
             weight = out_ray.valid.unsqueeze(-1)
@@ -800,7 +779,7 @@ class SequentialRayTracing(RenderingOptics):
         x, y = torch.meshgrid(x, y, indexing='xy')  # H x W
 
         if psf_center == 'linear':
-            center_xy = self.obj_proj(origins)[..., None, None, None, :]  # ... x 1 x 1 x 1 x 2
+            center_xy = self.obj_proj_lens(origins)[..., None, None, None, :]  # ... x 1 x 1 x 1 x 2
         elif psf_center == 'chief':
             center_xy = chief_ray.o[..., :2].unsqueeze(-2)  # ... x N_wl x 1 x 1 x 2
         else:
@@ -918,8 +897,3 @@ class SequentialRayTracing(RenderingOptics):
         psf = psf / psf.sum((-2, -1), True)
         psf = psf.flip(-2)
         return psf
-
-    def _get_cfg(self, name: str) -> Any:
-        if name not in self._default_cfg:
-            raise KeyError(f'Unknown config key for {self.__class__.__name__}: {name}')
-        return self._cfg.get(name, self._default_cfg[name])

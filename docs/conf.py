@@ -8,6 +8,7 @@
 
 import pathlib
 import sys
+
 # path to the src directory
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1].resolve().joinpath('src')))
 
@@ -30,8 +31,6 @@ extensions = [
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
-
-
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
@@ -45,3 +44,7 @@ html_js_files = [
 ]
 
 autodoc_member_order = 'groupwise'
+autodoc_mocked_imports = [
+    'matplotlib',
+    'torch',
+]

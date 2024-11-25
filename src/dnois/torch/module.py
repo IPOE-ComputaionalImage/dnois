@@ -81,7 +81,8 @@ class ParamTransformModule(nn.Module):
         latent_name = self._latent_name(name)
         if name in param_transforms:
             return param_transforms[name][0](super().__getattr__(latent_name))
-        return super().__getattr__(name)
+        else:
+            return super().__getattr__(name)
 
     def __setattr__(self, name, value):
         param_transforms = getattr(self, '_param_transforms', _unset)
@@ -97,7 +98,8 @@ class ParamTransformModule(nn.Module):
                                    f'if you intend to modify its value directly.')
             else:
                 super().__setattr__(latent_name, transform[1](value))
-        return super().__setattr__(name, value)
+        else:
+            return super().__setattr__(name, value)
 
     def __delattr__(self, name):
         param_transforms = getattr(self, '_param_transforms', _unset)
@@ -108,7 +110,8 @@ class ParamTransformModule(nn.Module):
         if name in param_transforms:
             super().__delattr__(latent_name)
             del param_transforms[name]
-        return super().__delattr__(name)
+        else:
+            return super().__delattr__(name)
 
     def register_parameter(
         self, name: str, param: nn.Parameter | None, transform: Transform = None, inverse: Transform = None,
@@ -237,8 +240,8 @@ class ParamTransformModule(nn.Module):
             if k.startswith('_latent_'):
                 name = self._nominal_name(k)
                 if name in param_transforms:
-                    del named_params[k]
-                    named_params[name] = param_transforms[name][0](named_params[k])
+                    value = named_params.pop(k)
+                    named_params[name] = param_transforms[name][0](value)
         return named_params
 
     @property

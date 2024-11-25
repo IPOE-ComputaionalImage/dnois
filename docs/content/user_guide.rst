@@ -14,5 +14,6 @@ TODO
     guide/overview
     guide/unit
     guide/transform
+    guide/exparam
     guide/optics
     guide/debug

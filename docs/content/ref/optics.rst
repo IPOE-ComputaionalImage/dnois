@@ -42,4 +42,9 @@ The following content implements :ref:`abstract_models` in these two ways.
 ***********************************
 Image formation
 ***********************************
-TODO
+TODO: description
+
+.. autosummary::
+    :toctree: ../generated/optics/formation
+
+    space_variant

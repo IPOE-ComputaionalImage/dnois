@@ -24,3 +24,9 @@ TODO
 Standard optical system
 ************************************
 TODO
+
+.. _guide_imodel_ref_model:
+
+Reference Model
+===================================
+TODO

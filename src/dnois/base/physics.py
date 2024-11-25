@@ -1,11 +1,16 @@
 import csv
 import importlib.resources
 
+import torch
+
 from . import unit as u
+from .typing import Numeric, Ts, overload
 
 __all__ = [
     'fline',
     'fraunhofer_line',
+    'refract',
+    'wave_vec',
 ]
 
 with importlib.resources.open_text(__package__, 'fl.csv') as f:
@@ -74,7 +79,8 @@ def fraunhofer_line(
             if item[0] == symbol and item[1] == element:
                 return u.convert(item[2], 'm', unit)
         raise KeyError(f'There is no Fraunhofer line with symbol {symbol} and element {element}. '
-                       f'Refer to https://en.wikipedia.org/wiki/Fraunhofer_lines for more information.')
+                       f'Refer to https://en.wikipedia.org/wiki/Fraunhofer_lines or call '
+                       f'{fraunhofer_line.__qualname__} without arguments for more information.')
 
     # ret is a dict
     if len(ret) == 1 and alone:
@@ -88,3 +94,49 @@ def fline(
 ) -> float | dict[str, float] | list[tuple[str, str, float]]:
     """Alias for :func:`fraunhofer_line`."""
     return fraunhofer_line(str(symbol), element, alone, unit)
+
+
+def wave_vec(wl: Numeric) -> Numeric:
+    r"""
+    Computes magnitude of wavelength vector:
+
+    .. math::
+        k=2\pi/\lambda
+
+    :param wl: Wavelength :math:`\lambda`.
+    :type wl: Tensor or float
+    :return: Magnitude of wavelength vector.
+    :rtype: same as ``wl``.
+    """
+    return torch.pi * 2 / wl
+
+
+def _as_tensor(x, src: Ts) -> Ts:
+    if not torch.is_tensor(x):
+        return src.new_tensor(x)
+    return x
+
+
+@overload
+def refract(incident: Ts, normal: Ts, mu: Numeric) -> Ts:
+    pass
+
+
+@overload
+def refract(incident: Ts, normal: Ts, n1: Numeric, n2: Numeric) -> Ts:
+    pass
+
+
+def refract(incident: Ts, normal: Ts, n1: Numeric, n2: Numeric = None) -> Ts:
+    ni = torch.sum(normal * incident, -1, True)  # inner product
+    n1 = _as_tensor(n1, ni)
+
+    if n2 is None:
+        mu = n1
+        nt2 = 1 - mu.square() * (1 - ni.square())
+        refractive = torch.sqrt(nt2) * normal + mu * (incident - ni * normal)
+        return refractive
+    else:
+        n2 = _as_tensor(n2, ni)
+        deflection = (torch.sqrt(n2.square() - n1.square() + ni.square()) - ni) * normal
+        return incident + deflection

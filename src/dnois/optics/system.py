@@ -9,8 +9,8 @@ from . import formation
 from .. import scene as _sc, base, utils, torch as _t
 from ..base import ShapeError, typing
 from ..base.typing import (
-    Ts, Size2d, FovSeg, Vector, SclOrVec, Callable,
-    size2d, vector, scl_or_vec
+    Ts, Size2d, FovSeg, Vector, Callable, Any,
+    size2d, vector, cast
 )
 
 __all__ = [
@@ -160,12 +160,36 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         fov = self.obj2tanfov(point).arctan()
         return fov.rad2deg() if in_degrees else fov
 
+    def obj_proj(self, point: Ts, flip: bool = True) -> Ts:
+        r"""
+        Projects coordinates of points in
+        :ref:`camera's coordinate system <guide_imodel_cameras_coordinate_system>`
+        to image plane in a perspective manner:
+
+        .. math::
+            \left\{\begin{array}{l}
+            x'=-\frac{f}{z}x
+            y'=-\frac{f}{z}y
+            \end{array}\right.
+
+        where :math:`f` is the focal length of :ref:`reference model <guide_imodel_ref_model>`.
+        The negative sign is eliminated if ``flip`` is ``True``.
+
+        :param Tensor point: Coordinates of points. A tensor with shape ``(..., 3)``
+            where the last dimension indicates coordinates of points in camera's coordinate system.
+        :param bool flip: If ``True``, returns coordinates projected on flipped (virtual) image plane.
+            Otherwise, returns those projected on original image plane.
+        :return: Projected x and y coordinates of points. A tensor of shape ``(..., 2)``.
+        :rtype: Tensor
+        """
+        xy = self.obj2tanfov(point) * self.reference.focal_length
+        return -xy if flip else xy
+
     @property
     @abc.abstractmethod
     def reference(self) -> 'Pinhole':
         """
-        Returns the reference model of this object.
-        See :ref:`guide_imodel_standard_optical_system` for details.
+        Returns the :ref:`reference model <guide_imodel_ref_model>` of  this object.
 
         :type: :class:`Pinhole`
         """
@@ -186,23 +210,23 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
     Base class for optical systems with optical imaging behavior defined.
     See :doc:`/content/guide/optics/imodel` for details.
 
-    See :class:`RenderingOptics` for descriptions about more parameters.
+    See :class:`StandardOptics` for descriptions about more parameters.
 
     :param wl: Wavelengths for imaging. Default: Fraunhofer *d* line.
         See :func:`~dnois.fraunhofer_line` for details.
     :type wl: float, Sequence[float] or 1D Tensor
     :param fov_segments: Number of field-of-view segments when rendering images.
-        Default: ``paraxial``.
+        Default: ``'paraxial'``.
 
         ``int`` or ``tuple[int, int]``
             The numbers of FoV segments in vertical and horizontal directions.
             PSFs in each segment are assumed to be FoV-invariant.
 
-        ``paraxial``
-            Only paraxial points are considered. In other words,
+        ``'paraxial'``
+            Only "paraxial" points are considered. In other words,
             PSF is assumed to not depend on FoV.
 
-        ``pointwise``
+        ``'pointwise'``
             The optical responses of every individual object points will be computed.
     :type fov_segments: int, tuple[int, int] or str
     :param depth: Depth adopted for rendering images when the scene to be imaged
@@ -221,7 +245,16 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
     :param bool depth_aware: Whether this model supports depth-aware rendering.
         If not, scenes to be images are assumed to lie within a plane
         with single depth even with depth map given. Default: ``False``.
-    :param bool coherent: Whether this model renders images coherently. Default: ``False``.
+    :param psf_size: Height and width of PSF (i.e. convolution kernel) used to simulate imaging.
+        Default: ``(64, 64)``.
+    :type psf_size: int or tuple[int, int]
+    :param patch_padding: Padding amount for each patch used for patch-wise (spatially variant) imaging.
+        See :func:`~dnois.optics.space_variant` for more details. Default: ``(0, 0)``.
+    :type patch_padding: int or tuple[int, int]
+    :param bool linear_conv: Whether to compute linear convolution rather than
+        circular convolution when computing blurred image. Default: ``False``.
+    :param str patch_merging: Merging method to use for patch-wise (spatially variant) imaging.
+        See :func:`~dnois.optics.space_variant` for more details. Default: ``'slope'``.
     """
 
     def __init__(
@@ -229,19 +262,19 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
         image_distance: float = None,
+        *,
         wl: Vector = None,
         fov_segments: FovSeg | Size2d = 'paraxial',
-        depth: SclOrVec | tuple[Ts, Ts] = float('inf'),
+        depth: Vector | tuple[Ts, Ts] = float('inf'),
         depth_aware: bool = False,
-        coherent: bool = False,
         psf_size: Size2d = 64,
+        patch_padding: Size2d = 0,
+        linear_conv: bool = False,
+        patch_merging: utils.PatchMerging = 'slope',
     ):
+        super().__init__(pixel_num, pixel_size, image_distance)
         if wl is None:
             wl = base.fraunhofer_line('d', 'He')  # self.wl is assumed to never be None
-        if not isinstance(fov_segments, str):
-            fov_segments = size2d(fov_segments)
-
-        super().__init__(pixel_num, pixel_size, image_distance)
 
         self.register_buffer('_b_wl', None, False)
         self.register_buffer('_b_depth', None, False)
@@ -250,16 +283,48 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
 
         self.wl = wl  # property setter
         self.depth = depth  # property setter
-        #: Number of segments of FoV when rendering images.
-        #: See :py:class:`~SequentialRayTracing` for options.
-        self.fov_segments: FovSeg | tuple[int, int] = fov_segments
-        self.depth_aware: bool = depth_aware  #: Whether to render images in a depth-aware manner.
-        self.coherent: bool = coherent  #: Whether this system is coherent
-        #: Number of pixels in PSF in vertical and horizontal directions.
-        self.psf_size: tuple[int, int] = size2d(psf_size)
+        #: See :class:`RenderingOptics`.
+        self.fov_segments: FovSeg | tuple[int, int] = cast(FovSeg | tuple[int, int], fov_segments)
+        self.depth_aware: bool = depth_aware  #: See :class:`RenderingOptics`.
+        self.psf_size: tuple[int, int] = psf_size  #: See :class:`RenderingOptics`.
+        self.patch_padding: tuple[int, int] = patch_padding  #: See :class:`RenderingOptics`.
+        self.linear_conv: bool = linear_conv  #: See :class:`RenderingOptics`.
+        self.patch_merging: utils.PatchMerging = patch_merging  #: See :class:`RenderingOptics`.
+
+    def __setattr__(self, name, value):
+        normalizer = getattr(self, '_normalize_' + name, None)
+        if normalizer is not None:
+            value = normalizer(value)
+        return super().__setattr__(name, value)
+
+    def pick(self, name: str, value=None) -> Any:
+        """
+        Determine the value of an :doc:`external parameter </content/guide/exparam>`
+        ``name``. The return value is determined by the eponymous attribute of ``self``
+        if ``value`` is ``None``, or ``value`` otherwise.
+
+        :param str name: Name of the external parameter.
+        :param Any value: Candidate of the external parameter.
+            Default: the eponymous attribute of ``self``.
+        :return: Value of the external parameter.
+        :rtype: Any
+        """
+        picker = getattr(self, '_pick_' + name, None)
+        if picker is not None:
+            return picker(value)
+
+        # This is needed even when value is not None to ensure name represents a valid config item
+        attr = getattr(self, name, ...)
+        if attr is ...:
+            raise ValueError(f'Unknown external parameter for {self.__class__.__name__}: {name}')
+        if value is None:
+            return attr
+
+        normalizer = getattr(self, '_normalize_' + name, None)
+        return value if normalizer is None else normalizer(value)
 
     @abc.abstractmethod
-    def psf(self, origins: Ts, size: Size2d, wl: Vector = None) -> Ts:
+    def psf(self, origins: Ts, size: Size2d = None, wl: Vector = None, **kwargs) -> Ts:
         r"""
         Returns PSF of points whose coordinates
         in :ref:`camera's coordinate system <guide_imodel_cameras_coordinate_system>`
@@ -267,7 +332,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
 
         The coordinate direction of returned PSF is defined as follows.
         Horizontal and vertical directions represent x- and y-axis, respectively.
-        x is positive in right side and y is positive in upper side.
+        x is positive in left side and y is positive in upper side.
         In 3D space, the directions of x- and y-axis are identical to that of
         camera's coordinate system. In this way, returned PSF can be convolved with
         a clear image directly to produce a blurred image.
@@ -284,12 +349,13 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         """
         pass
 
-    def forward(self, scene: _sc.Scene, **kwargs) -> Ts:
+    def forward(self, scene: _sc.Scene, fov_segments: FovSeg | Size2d = None, **kwargs) -> Ts:
         r"""
         Implementation of :doc:`imaging simulation </content/guide/overview>`.
 
         :param scene: The scene to be imaged.
         :type scene: :class:`~dnois.scene.Scene`
+        :param fov_segments: See :class:`~.ConfigItems`.
         :param kwargs: Additional keyword arguments.
         :return: Computed :ref:`imaged radiance field <guide_overview_irf>`.
             A tensor of shape :math:`(B, N_\lambda, H, W)`.
@@ -297,9 +363,10 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         """
         self._check_scene(scene)
         scene: _sc.ImageScene
-        if self.fov_segments == 'paraxial':
+        fov_segments = self.pick('fov_segments', fov_segments)
+        if fov_segments == 'paraxial':
             return self.conv_render(scene, **kwargs)
-        elif self.fov_segments == 'pointwise':
+        elif fov_segments == 'pointwise':
             return self.pointwise_render(scene, **kwargs)
         else:  # tuple[int, int]
             return self.patchwise_render(scene, **kwargs)
@@ -308,7 +375,8 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         self,
         scene: _sc.ImageScene,
         wl: Vector = None,
-        depth: SclOrVec | tuple[Ts, Ts] = None,
+        depth: Vector | tuple[Ts, Ts] = None,
+        psf_size: Size2d = None,
         **kwargs,
     ) -> Ts:
         raise NotImplementedError()
@@ -318,34 +386,38 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         scene: _sc.ImageScene,
         segments: Size2d = None,
         wl: Vector = None,
-        depth: SclOrVec | tuple[Ts, Ts] = None,
-        pad: Size2d = 0,
-        linear_conv: bool = False,
-        merging: utils.PatchMerging = 'slope',
+        depth: Vector | tuple[Ts, Ts] = None,
+        psf_size: Size2d = None,
+        pad: Size2d = None,
+        linear_conv: bool = None,
+        merging: utils.PatchMerging = None,
+        **kwargs
     ) -> Ts:
-        segments = self.fov_segments if segments is None else size2d(segments)
-        wl = self._pick_wl(wl)
-        depth = self._pick_depth(depth)
+        segments = self.pick('fov_segments', segments)
+        wl = self.pick('wl', wl)
+        depth = self.pick('depth', depth)
+        pad = self.pick('patch_padding', pad)
+        linear_conv = self.pick('linear_conv', linear_conv)
+        merging = self.pick('patch_merging', merging)
+        psf_size = self.pick('psf_size', psf_size)
 
         self._check_scene(scene)
-        if self.coherent:
-            raise NotImplementedError()
-        if not isinstance(segments, tuple):
+        if not isinstance(segments, tuple) or not len(segments) == 2:
             raise ValueError(f'segments must be a pair of ints, got {type(segments)}')
         if scene.intrinsic is not None:
             raise NotImplementedError()
         if wl.numel() != scene.n_wl:
-            raise ValueError(f'A scene with {self.wl.numel()} wavelengths expected, '
+            raise ValueError(f'A scene with {wl.numel()} wavelengths expected, '
                              f'got {scene.n_wl}')
+        if scene.depth_aware:
+            warnings.warn(f'Depth-aware rendering is not supported currently for {self.__class__.__name__}')
 
         scene = scene.batch()
         rm = self.reference
         n_b, n_wl, n_h, n_w = scene.image.shape
 
-        if scene.depth_aware:
-            warnings.warn(f'Depth-aware rendering is not supported currently for {self.__class__.__name__}')
         if not (torch.is_tensor(depth) and depth.ndim == 0):
-            depth = torch.stack([self.sample_depth(depth) for _ in range(n_b)])  # B(1)
+            depth = torch.stack([self.random_depth(depth) for _ in range(n_b)])  # B(1)
         tanfov_y, tanfov_x = utils.sym_grid(
             2, segments, (2 / segments[0], 2 / segments[1]), True, device=self.device, dtype=self.dtype
         )
@@ -354,33 +426,18 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         # B(1) x N_x x N_y
         obj_points = self.fovd2obj(torch.stack([tanfov_x, tanfov_y], -1), depth.view(-1, 1, 1))
 
-        psf = self.psf(obj_points, self.psf_size, wl)  # B(1) x N_x x N_y x N_wl x H x W TODO: args
-        psf = psf.flip((-2, -1))
+        psf = self.psf(obj_points, psf_size, wl, **kwargs)  # B(1) x N_x x N_y x N_wl x H x W
 
         psf = psf.permute(0, 3, 1, 2, 4, 5)  # B(1) x N_wl x N_x x N_y x H x W
         image_blur = formation.space_variant(scene.image, psf, pad, linear_conv, merging)  # B x N_wl x H x W
         return image_blur
 
     def conv_render(self, scene: _sc.ImageScene, **kwargs) -> Ts:
-        self._check_scene(scene)
-        kwargs = {}
-        warning_str = (f'Trying to render a {{0}} image by an instance of '
-                       f'{self.__class__.__name__} that does not support it')
-        depth_aware, polarized = False, False
-        if scene.depth_aware:
-            if self.depth_aware:
-                kwargs['depth_map'] = scene.depth
-                depth_aware = True
-            else:
-                warnings.warn(warning_str.format('depth aware'))
-        if scene.n_plr != 0:
-            warnings.warn(warning_str.format('polarized'))
-
         raise NotImplementedError()
 
-    def get_depth(
+    def seq_depth(
         self,
-        depth: SclOrVec | tuple[Ts, Ts] = None,
+        depth: Vector | tuple[Ts, Ts] = None,
         sampling_curve: Callable[[Ts], Ts] = None,
         n: int = None
     ) -> Ts:
@@ -399,7 +456,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         - If a 0D tensor, returns it but as a 1D tensor with length one.
         - If a 1D tensor, returns it as-is.
 
-        :param depth: See the eponymous argument of :class:`RenderingOptics` for details.
+        :param depth: See the eponymous argument of :class:`RenderingOptics.ConfigItems` for details.
             Default: :attr:`.depth`.
         :type depth: float, Sequence[float], Tensor or tuple[Tensor, Tensor]
         :param sampling_curve: Sampling curve :math:`\Gamma`,
@@ -409,7 +466,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         :return: 1D tensor of depths.
         :rtype: Tensor
         """
-        depth = self._pick_depth(depth)
+        depth = self.pick('depth', depth)
         if isinstance(depth, tuple):  # [min, max]
             if n is None:
                 raise TypeError(f'Number of depths must be given because only the lower and '
@@ -423,14 +480,11 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
             return d1 + (d2 - d1) * t
         elif sampling_curve is not None or n is not None:
             warnings.warn(f'sampling_curve and n are ignored because depth is already specified')
-        if depth.ndim == 0:  # fixed depth
-            return depth.reshape(1)
-        else:  # a sequence of depths
-            return depth
+        return depth
 
-    def sample_depth(
+    def random_depth(
         self,
-        depth: SclOrVec | tuple[Ts, Ts] = None,
+        depth: Vector | tuple[Ts, Ts] = None,
         sampling_curve: Callable[[Ts], Ts] = None,
         probabilities: Ts = None
     ) -> Ts:
@@ -445,11 +499,10 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
           where :math:`t` is drawn uniformly from :math:`[0,1]`. An optional ``sampling_curve``
           (denoted by :math:`\Gamma`) can be given to control its distribution.
           By default, :math:`\Gamma` is constructed so that the inverse of depth is evenly spaced.
-        - If a 0D tensor, returns it as-is.
         - If a 1D tensor, randomly draws a value from it. Corresponding probability
           distribution can be given by ``probabilities``.
 
-        :param depth: See the eponymous argument of :class:`RenderingOptics` for details.
+        :param depth: See the eponymous argument of :class:`ConfigItems` for details.
             Default: :attr:`.depth`.
         :type depth: float, Sequence[float], Tensor or tuple[Tensor, Tensor]
         :param sampling_curve: Sampling curve :math:`\Gamma`,
@@ -460,7 +513,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         :return: A 0D tensor of randomly sampled depth.
         :rtype: Tensor
         """
-        depth = self._pick_depth(depth)
+        depth = self.pick('depth', depth)
         if isinstance(depth, tuple):  # randomly sampling from a depth range
             d1, d2 = depth
             t = torch.rand_like(d2)
@@ -469,8 +522,6 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
             else:
                 t = d1 * t / (d2 - (d2 - d1) * t)  # default sampling curve
             return d1 + (d2 - d1) * t
-        elif depth.ndim == 0:  # fixed depth
-            return depth
         else:  # randomly sampling from a set of depth values
             if probabilities is None:
                 idx = torch.randint(depth.numel(), ()).item()
@@ -491,8 +542,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         return (self._b_depth_min, self._b_depth_max) if d is None else d
 
     @depth.setter
-    def depth(self, value: SclOrVec | tuple[Ts, Ts]):
-        value = self._make_depth(value)
+    def depth(self, value: Ts | tuple[Ts, Ts]):  # already normalized in __setattr__
         if torch.is_tensor(value):
             self._b_depth, self._b_depth_min, self._b_depth_max = value, None, None
         else:
@@ -504,8 +554,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         return self._b_wl
 
     @wl.setter
-    def wl(self, value: Vector):
-        value = vector(value, dtype=self.dtype, device=self.device)
+    def wl(self, value: Ts):  # already normalized in __setattr__
         self._b_wl = value
 
     def _delegate(self) -> Ts:
@@ -517,19 +566,25 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
         if scene.n_plr != 0:
             raise RuntimeError(f'{self.__class__.__name__} does not support polarization currently')
 
-    def _make_depth(self, depth: SclOrVec | tuple[Ts, Ts]) -> Ts | tuple[Ts, Ts]:
+    def _normalize_depth(self, depth: Vector | tuple[Ts, Ts]) -> Ts | tuple[Ts, Ts]:
         if isinstance(depth, tuple) and len(depth) == 2 and all(torch.is_tensor(t) for t in depth):
             if depth[0].ndim != 0 or depth[1].ndim != 0:
                 raise ShapeError(f'If a pair of tensor, both of them should be 0D, got {depth}')
         else:
-            depth = scl_or_vec(depth, dtype=self.dtype, device=self.device)
+            depth = vector(depth, dtype=self.dtype, device=self.device)
         return depth
 
-    def _pick_depth(self, depth: SclOrVec | tuple[Ts, Ts] = None) -> Ts | tuple[Ts, Ts]:
-        return self.depth if depth is None else self._make_depth(depth)
+    def _normalize_wl(self, wl: Vector):
+        return vector(wl, dtype=self.dtype, device=self.device)
 
-    def _pick_wl(self, wl: Vector = None) -> Ts:
-        return self.wl if wl is None else vector(wl, dtype=self.dtype, device=self.device)
+    @staticmethod
+    def _normalize_fov_segments(fov_segments: FovSeg | Size2d) -> FovSeg | tuple[int, int]:
+        if not isinstance(fov_segments, str):
+            fov_segments = size2d(fov_segments)
+        return fov_segments
+
+    _normalize_psf_size = staticmethod(size2d)
+    _normalize_patch_padding = staticmethod(size2d)
 
 
 class Pinhole(StandardOptics):

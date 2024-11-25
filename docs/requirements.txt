@@ -1,4 +1,2 @@
 furo==2024.8.6
-matplotlib==3.9.2
 sphinx==8.0.2
-torch==2.4.0

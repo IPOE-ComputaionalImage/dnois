@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from .ray import BatchedRay
-from ... import mt, utils, torch as _t
+from ... import mt, utils, torch as _t, base
 from ...base.typing import (
     Sequence, Ts, Any, Callable, Scalar, Self, Size2d,
     scalar, size2d, cast
@@ -512,19 +512,15 @@ class Surface(_t.TensorContainerMixIn, ParamTransformModule, metaclass=abc.ABCMe
         if self.context.material_before == self.material:
             return ray
 
-        n = self.normal(ray.x, ray.y)
-        i = ray.d_norm
+        normal = self.normal(ray.x, ray.y)
         if forward:
             miu = self.context.material_before.n(ray.wl, 'm') / self.material.n(ray.wl, 'm')
         else:
             miu = self.material.n(ray.wl, 'm') / self.context.material_before.n(ray.wl, 'm')
-            n = -n
-        miu = miu.unsqueeze(-1)
-        ni = torch.sum(n * i, -1, True)
-        nt2 = 1 - miu.square() * (1 - ni.square())
-        t = torch.sqrt(nt2.relu()) * n + miu * (i - ni * n)
-        ray.d = t
-        ray.update_valid_(nt2.squeeze(-1) >= 0).norm_d_()
+            normal = -normal
+        refractive = base.refract(ray.d_norm, normal, miu.unsqueeze(-1))
+        ray.d = refractive.nan_to_num(nan=0)
+        ray.update_valid_(~refractive[..., 0].isnan()).norm_d_()
         return ray
 
     def sample(self, mode: str, *args, **kwargs) -> Ts:
@@ -762,7 +758,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         lim2 = self.geo_radius.square()
         if lim2.isinf().all():
             return self.h_r2(r2)
-        return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2*EDGE_CUTTING))
+        return torch.where(r2 <= lim2, self.h_r2(r2), self.h_r2(lim2 * EDGE_CUTTING))
 
     @property
     def geo_radius(self) -> Ts:
