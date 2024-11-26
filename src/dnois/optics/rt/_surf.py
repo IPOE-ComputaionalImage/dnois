@@ -82,7 +82,7 @@ class Context:
         """
         idx = self.index
         if idx == 0:
-            return self.lens_group.env_material
+            return self.lens_group.mt_head
         return self.lens_group[idx - 1].material
 
     @property
@@ -108,7 +108,7 @@ class Context:
             'This may be because the surface has been removed from the lens group.')
 
 
-class Aperture(_t.TensorContainerMixIn, ParamTransformModule, metaclass=abc.ABCMeta):
+class Aperture(_t.TensorContainerMixIn, ParamTransformModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
     """
     Base class for aperture shapes. Aperture refers to the region on a surface
     where rays can transmit. The region outside the aperture is assumed to be
@@ -180,6 +180,20 @@ class Aperture(_t.TensorContainerMixIn, ParamTransformModule, metaclass=abc.ABCM
         if meth is ...:
             raise ValueError(f'Unknown sampling mode for {self.__class__.__name__}: {mode}')
         return meth(*args, **kwargs)
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        if cls is not Aperture:
+            d.pop('type')
+            return cls(**d)
+
+        ty = d['type']
+        subs = utils.subclasses(cls)
+        for sub in subs:
+            if sub.__name__ == ty:
+                return cast(type[Aperture], sub).from_dict(d)
+        aperture_types = [sub.__name__ for sub in subs]
+        raise RuntimeError(f'Unknown aperture type: {ty}. Available: {aperture_types}')
 
 
 class CircularAperture(Aperture):
@@ -293,11 +307,17 @@ class CircularAperture(Aperture):
         theta = theta.unsqueeze(-1)
         return r * theta.cos(), r * theta.sin()
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'type': self.__class__.__name__,
+            'radius': self.radius.item(),
+        }
+
     def _delegate(self) -> Ts:
         return self.radius
 
 
-class Surface(_t.TensorContainerMixIn, ParamTransformModule, metaclass=abc.ABCMeta):
+class Surface(_t.TensorContainerMixIn, ParamTransformModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
     r"""
     Base class for optical surfaces in a group of lens.
     The position of a surface in a lens group is specified by a single z-coordinate,
@@ -536,6 +556,28 @@ class Surface(_t.TensorContainerMixIn, ParamTransformModule, metaclass=abc.ABCMe
         z = self.h_extended(x, y) + self.context.z
         return torch.stack([x, y, z], dim=-1)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'type': self.__class__.__name__,
+            'material': self.material.name,
+            'distance': self.distance.item(),
+            'aperture': self.aperture.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        if cls is not Surface:
+            d.pop('type')
+            d['aperture'] = Aperture.from_dict(d['aperture'])
+            return cls(**d)
+
+        ty = d['type']
+        subs = utils.subclasses(cls, False)
+        for sub in subs:
+            if sub.__name__ == ty:
+                return cast(type[Surface], sub).from_dict(d)
+        raise RuntimeError(f'Unknown surface type: {ty}. Available: {surface_types(True)}')
+
     def _delegate(self) -> Ts:
         return self.distance
 
@@ -616,7 +658,7 @@ class Planar(Surface):
 
 class Stop(Planar):
     def __init__(self, distance: Scalar, aperture: Aperture, move_ray: bool = True):
-        super().__init__('vacuum', distance, aperture)
+        super().__init__('vacuum', distance, aperture)  # material is ignored
         self._move_ray = move_ray
 
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
@@ -635,6 +677,11 @@ class Stop(Planar):
 
     def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
         return ray.clone()
+
+    def to_dict(self) -> dict[str, Any]:
+        d = super().to_dict()
+        d.pop('material')
+        return d
 
     @property
     def material(self) -> mt.Material:  # override
@@ -785,9 +832,17 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
 
 
 class CircularStop(Stop, CircularSurface):
+    aperture: CircularAperture
+
     def __init__(self, distance: Scalar, radius: Scalar):
         aperture = CircularAperture(radius)
         super().__init__(distance, aperture)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = super().to_dict()
+        del d['aperture']
+        d['radius'] = self.aperture.radius.item()
+        return d
 
     def h_derivative_r2(self, r2: Ts) -> Ts:
         return torch.zeros_like(r2)
@@ -795,8 +850,12 @@ class CircularStop(Stop, CircularSurface):
     def h_r2(self, r2: Ts) -> Ts:
         return torch.zeros_like(r2)
 
+    @classmethod
+    def from_dict(cls, d: dict):
+        return cls(d['distance'], d['radius'])
 
-class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
+
+class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMixIn):
     """
     A sequential container of surfaces. This class is derived from
     :py:class:`torch.nn.ModuleList` and implements
@@ -806,8 +865,8 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
 
     :param surfaces: A sequence of :py:class:`Surface` objects. Default: ``[]``.
     :type surfaces: Sequence[Surface]
-    :param env_material: The material before the first surface.
-    :type env_material: :py:class:`~dnois.mt.Material`
+    :param foremost_material: The material before the first surface.
+    :type foremost_material: :py:class:`~dnois.mt.Material`
     """
     _force_surface: bool = True
     __call__: Callable[..., BatchedRay]  # for return type hint in IDE
@@ -815,20 +874,20 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
     def __init__(
         self,
         surfaces: Sequence[Surface] = None,
-        env_material: mt.Material | str = 'vacuum',
+        foremost_material: mt.Material | str = 'vacuum',
     ):
         super().__init__()
         if surfaces is None:
             surfaces = []
-        if not isinstance(env_material, mt.Material):
-            env_material = mt.get(env_material)
+        if not isinstance(foremost_material, mt.Material):
+            foremost_material = mt.get(foremost_material)
 
         # This is needed to facilitate MutableSequence operations
         # because torch.nn.ModuleList saves submodules like a dict rather than list
         self._slist: list[Surface] = []
         self._stop_idx = None
         #: Material before the first surface.
-        self.env_material: mt.Material = env_material
+        self.mt_head: mt.Material = foremost_material
 
         self.extend(surfaces)
 
@@ -861,7 +920,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
 
     def __reversed__(self) -> 'SurfaceList':
         """:meta private:"""
-        return SurfaceList(list(self._slist.__reversed__()), self.env_material)
+        return SurfaceList(list(self._slist.__reversed__()), self.mt_head)
 
     def __setitem__(self, key: int, value: Surface):
         """:meta private:"""
@@ -871,12 +930,12 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
 
     def __add__(self, other: Sequence[Surface]) -> 'SurfaceList':
         """:meta private:"""
-        return SurfaceList(self._slist + list(other), self.env_material)
+        return SurfaceList(self._slist + list(other), self.mt_head)
 
     def __repr__(self) -> str:
         """:meta private:"""
         _repr = super().__repr__()[:-1]  # remove that last parentheses
-        _repr += f'  env_material={repr(self.env_material)}\n)'
+        _repr += f'  env_material={repr(self.mt_head)}\n)'
         return _repr
 
     def __dir__(self):
@@ -960,14 +1019,11 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
                 raise e
         return ray
 
-    @property
-    def tolist(self) -> list[Surface]:
-        """
-        Returns a list of contained surfaces.
-
-        :type: list[Surface]
-        """
-        return [s for s in self._slist]
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            'surfaces': [s.to_dict() for s in self._slist],
+            'foremost_material': self.mt_head.name,
+        }
 
     @property
     def first(self) -> Surface:
@@ -1007,15 +1063,6 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         return cast(Ts, sum(s.distance for s in self._slist[:-1]))
 
     @property
-    def mt_head(self) -> mt.Material:
-        """
-        Returns the material before the first surface. Identical to :attr:`env_material`.
-
-        :type: :class:`~Material`
-        """
-        return self._slist[0].material
-
-    @property
     def mt_tail(self) -> mt.Material:
         """
         Returns the material after the last surface.
@@ -1053,6 +1100,11 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence):
         """
         idx = self._stop_idx
         return None if idx is None else self._slist[idx]
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        d['surfaces'] = [Surface.from_dict(s) for s in d['surfaces']]
+        return cls(**d)
 
     def _welcome(self, *new: Surface):
         for surface in new:

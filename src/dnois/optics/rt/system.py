@@ -5,7 +5,7 @@ import warnings
 import matplotlib.pyplot as plt
 import torch
 
-from . import surf
+from . import surf, SurfaceList
 from .ray import BatchedRay
 from ..system import RenderingOptics, Pinhole
 from ... import scene as _sc, base, utils, fourier, torch as _t
@@ -119,6 +119,11 @@ class SequentialRayTracing(RenderingOptics):
     :param str coherent_tracing_sampling_pattern: Sampling pattern for coherent tracing.
         Default: ``'quadrapolar'``.
     """
+    _inherent = RenderingOptics._inherent + ['surfaces']
+    _external = RenderingOptics._external + [
+        'psf_type', 'psf_center', 'sampling_mode', 'sampling_args',
+        'vignette', 'coherent_tracing_samples', 'coherent_tracing_sampling_pattern'
+    ]
 
     def __init__(
         self,
@@ -152,8 +157,8 @@ class SequentialRayTracing(RenderingOptics):
         scene: _sc.ImageScene,
         wl: Vector = None,
         depth: Vector | tuple[Ts, Ts] = None,
-        psf_type: str = None,
         psf_size: Size2d = None,
+        psf_type: str = None,
         psf_center: PsfCenter = None,
         **kwargs,
     ) -> Ts:
@@ -407,66 +412,16 @@ class SequentialRayTracing(RenderingOptics):
     def principal2(self) -> Ts:
         raise NotImplementedError()
 
-    # Constructors
+    # Serialization
     # ===========================
-
     @classmethod
-    def from_json(  # TODO
-        cls, *,
-        path: Any = None,
-        file: IO = None,
-        data: str | bytes | bytearray = None,
-        **kwargs
-    ) -> 'SequentialRayTracing':
-        if data is not None:
-            _check_arg(file, 'data', 'file')
-            _check_arg(path, 'data', 'path')
-            file, path = None, None
-        elif file is not None:
-            _check_arg(path, 'file', 'path')
-            path = None
-        elif path is None:
-            raise ValueError('Either path, file or data must be provided')
+    def from_dict(cls, d: dict):
+        depth = d['depth']
+        if isinstance(depth, dict):
+            d['depth'] = (torch.tensor(depth['min']), torch.tensor(depth['max']))
 
-        info = ...
-        if path is not None:
-            with open(path, 'r', encoding='utf8') as f:
-                info = json.load(f, **kwargs)
-        if file is not None:
-            info = json.load(file, **kwargs)
-        if data is not None:
-            info = json.loads(data, **kwargs)
-
-        return cls.from_pyds(info)
-
-    @classmethod
-    def from_pyds(cls, info: dict[str, Any]) -> 'SequentialRayTracing':  # TODO
-        # surfaces
-        sl = surf.SurfaceList([surf.build_surface(cfg) for cfg in info['surfaces']], info['environment_material'])
-
-        # sensor
-        sensor_cfg = info['sensor']
-        pixel_num = (sensor_cfg['pixels_h'], sensor_cfg['pixels_w'])
-        pixel_size = (sensor_cfg['pixel_size_h'], sensor_cfg['pixel_size_w'])
-
-        # optional
-        kwargs = {}
-        if 'render' in info:
-            render_cfg = info['render']
-
-            def _set(k):
-                if k in render_cfg:
-                    kwargs[k] = render_cfg[k]
-
-            _set('nominal_focal_length')
-            _set('wavelength')
-            _set('fov_segments')
-            _set('depth')
-            _set('depth_aware')
-            _set('polarized')
-            _set('coherent')
-            _set('sampling_arg')
-        return SequentialRayTracing(sl, pixel_num, pixel_size, **kwargs)
+        d['surfaces'] = SurfaceList.from_dict(d['surfaces'])
+        return cls(**d)
 
     # protected
     # ========================
@@ -555,7 +510,7 @@ class SequentialRayTracing(RenderingOptics):
                 torch.sum((points_sample - points_chief) * d_parallel, -1),
                 l0
             )  # ... x N_wl x N_spp'
-        ref_idx = self.surfaces.env_material.n(wl, 'm')
+        ref_idx = self.surfaces.mt_head.n(wl, 'm')
         # ... x N_wl x N_spp'
         ray = BatchedRay(points_sample, d_sample, wl, l0 * ref_idx, d_normalized=True)
         return ray, chief_ray

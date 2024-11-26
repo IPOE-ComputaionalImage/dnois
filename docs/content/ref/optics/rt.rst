@@ -18,7 +18,6 @@ Optical surfaces
 .. autosummary::
     :toctree: ../../generated/optics/rt/surf
 
-    build_surface
     surface_types
     Context
     CircularSurface

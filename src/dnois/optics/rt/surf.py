@@ -9,8 +9,6 @@ from ... import mt, base
 from ...base.typing import Any, Ts, Scalar, Vector, scalar, pair
 
 __all__ = [
-    'build_surface',
-
     'Conic',
     'EvenAspherical',
     'Fresnel',
@@ -61,6 +59,11 @@ class _SphericalBase(CircularSurface, metaclass=abc.ABCMeta):  # docstring for S
     ):
         super().__init__(material, distance, aperture, newton_config)
         self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
+
+    def to_dict(self) -> dict[str, Any]:
+        d = super().to_dict()
+        d['roc'] = self.roc.item()
+        return d
 
     @property
     def geo_radius(self) -> Ts:
@@ -129,6 +132,11 @@ class _ConicBase(_SphericalBase, metaclass=abc.ABCMeta):  # docstring for Conic
 
     def h_derivative_r2(self, r2: Ts) -> Ts:
         return _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = super().to_dict()
+        d['conic'] = self.conic.item()
+        return d
 
     @property
     def geo_radius(self) -> Ts:
@@ -221,6 +229,11 @@ class EvenAspherical(_ConicBase):
         for i in range(len(self.coefficients), 0, -1):
             a_der = a_der * r2 + self.coefficients[i - 1] * i
         return s_der + a_der
+
+    def to_dict(self) -> dict[str, Any]:
+        d = super().to_dict()
+        d['coefficients'] = [c.item() for c in self.coefficients]
+        return d
 
     @property
     def coefficients(self):
@@ -329,6 +342,9 @@ class PlanarPhase(Planar):
         ray.update_valid_(ndz2 >= 0)
         return ray
 
+    def to_dict(self) -> dict[str, Any]:
+        raise NotImplementedError()
+
     @property
     def cell_size(self) -> tuple[float, float]:
         return 2 * self.size[0] / (self.phase.size(0) - 1), 2 * self.size[1] / (self.phase.size(1) - 1)
@@ -378,7 +394,3 @@ class Fresnel(Planar, EvenAspherical):
             phpx, phpy = torch.where(mask, phpx, 0), torch.where(mask, phpy, 0)
         f_grad = torch.stack((-phpx, -phpy, torch.ones_like(phpx)), dim=-1)
         return f_grad / f_grad.norm(2, -1, True)
-
-
-def build_surface(surface_config: dict[str, Any]) -> CircularSurface:
-    raise NotImplementedError()

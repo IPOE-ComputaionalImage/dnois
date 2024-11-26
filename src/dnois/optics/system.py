@@ -30,7 +30,16 @@ class Optics(nn.Module, metaclass=abc.ABCMeta):
 
 
 class StandardOptics(Optics, metaclass=abc.ABCMeta):
-    """Base class of :ref:`standard optical system <guide_imodel_standard_optical_system>`."""
+    """
+    Base class of :ref:`standard optical system <guide_imodel_standard_optical_system>`.
+
+    :param pixel_num: Numbers of pixels in vertical and horizontal directions.
+    :type pixel_num: int or tuple[int, int]
+    :param pixel_size: Height and width of a pixel in meters.
+    :type pixel_size: float or tuple[float, float]
+    :param float image_distance: Focal length of the reference model, i.e. the image distance.
+    """
+    _inherent = ['pixel_num', 'pixel_size', 'image_distance']
 
     def __init__(
         self,
@@ -205,7 +214,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         return self.pixel_size[0] * self.pixel_num[0], self.pixel_size[1] * self.pixel_num[1]
 
 
-class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABCMeta):
+class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn, metaclass=abc.ABCMeta):
     """
     Base class for optical systems with optical imaging behavior defined.
     See :doc:`/content/guide/optics/imodel` for details.
@@ -256,6 +265,10 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
     :param str patch_merging: Merging method to use for patch-wise (spatially variant) imaging.
         See :func:`~dnois.optics.space_variant` for more details. Default: ``'slope'``.
     """
+    _external = [
+        'wl', 'fov_segments', 'depth', 'depth_aware',
+        'psf_size', 'patch_padding', 'linear_conv', 'patch_merging'
+    ]
 
     def __init__(
         self,
@@ -531,6 +544,11 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
                 idx = torch.multinomial(probabilities, 1).squeeze().item()
             return depth[idx]
 
+    def to_dict(self) -> dict[str, Any]:
+        d = {k: self._attr2dictitem(k) for k in self._inherent}
+        d.update({k: self._attr2dictitem(k) for k in self._external})
+        return d
+
     @property
     def depth(self) -> Ts | tuple[Ts, Ts]:
         """
@@ -585,6 +603,12 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, metaclass=abc.ABC
 
     _normalize_psf_size = staticmethod(size2d)
     _normalize_patch_padding = staticmethod(size2d)
+
+    def _todict_depth(self):
+        depth = self.depth
+        if torch.is_tensor(depth):
+            return depth.tolist()
+        return {'min': depth[0].tolist(), 'max': depth[1].tolist()}
 
 
 class Pinhole(StandardOptics):
