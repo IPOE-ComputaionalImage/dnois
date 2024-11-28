@@ -10,7 +10,7 @@ from ...base.typing import (
     Sequence, Ts, Any, Callable, Scalar, Self, Size2d,
     scalar, size2d, cast
 )
-from ...torch import ParamTransformModule
+from ...torch import EnhancedModule
 
 __all__ = [
     'NT_EPSILON',
@@ -108,7 +108,7 @@ class Context:
             'This may be because the surface has been removed from the lens group.')
 
 
-class Aperture(_t.TensorContainerMixIn, ParamTransformModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
+class Aperture(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
     """
     Base class for aperture shapes. Aperture refers to the region on a surface
     where rays can transmit. The region outside the aperture is assumed to be
@@ -209,7 +209,7 @@ class CircularAperture(Aperture):
         if radius <= 0:
             raise ValueError('radius must be positive')
 
-        self.register_buffer('radius', None, False)
+        self.register_buffer('radius', None)
         self.radius: Ts = scalar(radius)  #: Radius of the aperture.
 
     def evaluate(self, x: Ts, y: Ts) -> torch.BoolTensor:
@@ -307,17 +307,17 @@ class CircularAperture(Aperture):
         theta = theta.unsqueeze(-1)
         return r * theta.cos(), r * theta.sin()
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         return {
             'type': self.__class__.__name__,
-            'radius': self.radius.item(),
+            'radius': self._attr2dictitem('radius', keep_tensor),
         }
 
     def _delegate(self) -> Ts:
         return self.radius
 
 
-class Surface(_t.TensorContainerMixIn, ParamTransformModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
+class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
     r"""
     Base class for optical surfaces in a group of lens.
     The position of a surface in a lens group is specified by a single z-coordinate,
@@ -556,12 +556,12 @@ class Surface(_t.TensorContainerMixIn, ParamTransformModule, base.AsJsonMixIn, m
         z = self.h_extended(x, y) + self.context.z
         return torch.stack([x, y, z], dim=-1)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         return {
             'type': self.__class__.__name__,
             'material': self.material.name,
-            'distance': self.distance.item(),
-            'aperture': self.aperture.to_dict(),
+            'distance': self._attr2dictitem('distance', keep_tensor),
+            'aperture': self.aperture.to_dict(keep_tensor),
         }
 
     @classmethod
@@ -572,7 +572,7 @@ class Surface(_t.TensorContainerMixIn, ParamTransformModule, base.AsJsonMixIn, m
             return cls(**d)
 
         ty = d['type']
-        subs = utils.subclasses(cls, False)
+        subs = utils.subclasses(cls)
         for sub in subs:
             if sub.__name__ == ty:
                 return cast(type[Surface], sub).from_dict(d)
@@ -678,8 +678,8 @@ class Stop(Planar):
     def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
         return ray.clone()
 
-    def to_dict(self) -> dict[str, Any]:
-        d = super().to_dict()
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
+        d = super().to_dict(keep_tensor)
         d.pop('material')
         return d
 
@@ -838,10 +838,10 @@ class CircularStop(Stop, CircularSurface):
         aperture = CircularAperture(radius)
         super().__init__(distance, aperture)
 
-    def to_dict(self) -> dict[str, Any]:
-        d = super().to_dict()
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
+        d = super().to_dict(keep_tensor)
         del d['aperture']
-        d['radius'] = self.aperture.radius.item()
+        d['radius'] = self.aperture._attr2dictitem('radius', keep_tensor)
         return d
 
     def h_derivative_r2(self, r2: Ts) -> Ts:
@@ -1019,9 +1019,9 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
                 raise e
         return ray
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         return {
-            'surfaces': [s.to_dict() for s in self._slist],
+            'surfaces': [s.to_dict(keep_tensor) for s in self._slist],
             'foremost_material': self.mt_head.name,
         }
 

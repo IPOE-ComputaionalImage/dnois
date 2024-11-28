@@ -289,10 +289,10 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         if wl is None:
             wl = base.fraunhofer_line('d', 'He')  # self.wl is assumed to never be None
 
-        self.register_buffer('_b_wl', None, False)
-        self.register_buffer('_b_depth', None, False)
-        self.register_buffer('_b_depth_min', None, False)
-        self.register_buffer('_b_depth_max', None, False)
+        self.register_buffer('_b_wl', None)
+        self.register_buffer('_b_depth', None)
+        self.register_buffer('_b_depth_min', None)
+        self.register_buffer('_b_depth_max', None)
 
         self.wl = wl  # property setter
         self.depth = depth  # property setter
@@ -429,7 +429,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         rm = self.reference
         n_b, n_wl, n_h, n_w = scene.image.shape
 
-        if not (torch.is_tensor(depth) and depth.ndim == 0):
+        if not (torch.is_tensor(depth) and depth.numel() == 1):
             depth = torch.stack([self.random_depth(depth) for _ in range(n_b)])  # B(1)
         tanfov_y, tanfov_x = utils.sym_grid(
             2, segments, (2 / segments[0], 2 / segments[1]), True, device=self.device, dtype=self.dtype
@@ -437,7 +437,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         tanfov_x, tanfov_y = tanfov_x * math.tan(rm.fov_half_x), tanfov_y * math.tan(rm.fov_half_y)
         tanfov_x, tanfov_y = torch.broadcast_tensors(tanfov_x, tanfov_y)  # N_x x N_y
         # B(1) x N_x x N_y
-        obj_points = self.fovd2obj(torch.stack([tanfov_x, tanfov_y], -1), depth.view(-1, 1, 1))
+        obj_points = self.tanfovd2obj(torch.stack([tanfov_x, tanfov_y], -1), depth.view(-1, 1, 1))
 
         psf = self.psf(obj_points, psf_size, wl, **kwargs)  # B(1) x N_x x N_y x N_wl x H x W
 
@@ -544,9 +544,9 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
                 idx = torch.multinomial(probabilities, 1).squeeze().item()
             return depth[idx]
 
-    def to_dict(self) -> dict[str, Any]:
-        d = {k: self._attr2dictitem(k) for k in self._inherent}
-        d.update({k: self._attr2dictitem(k) for k in self._external})
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
+        d = {k: self._attr2dictitem(k, keep_tensor) for k in self._inherent}
+        d.update({k: self._attr2dictitem(k, keep_tensor) for k in self._external})
         return d
 
     @property
@@ -574,6 +574,14 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
     @wl.setter
     def wl(self, value: Ts):  # already normalized in __setattr__
         self._b_wl = value
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        d = d.copy()
+        depth = d['depth']
+        if isinstance(depth, dict):
+            d['depth'] = (torch.tensor(depth['min']), torch.tensor(depth['max']))
+        return super().from_dict(d)
 
     def _delegate(self) -> Ts:
         return self._b_wl
@@ -604,8 +612,10 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
     _normalize_psf_size = staticmethod(size2d)
     _normalize_patch_padding = staticmethod(size2d)
 
-    def _todict_depth(self):
+    def _todict_depth(self, keep_tensor: bool = True):
         depth = self.depth
+        if keep_tensor:
+            return depth
         if torch.is_tensor(depth):
             return depth.tolist()
         return {'min': depth[0].tolist(), 'max': depth[1].tolist()}

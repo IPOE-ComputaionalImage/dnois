@@ -1,16 +1,18 @@
-from functools import partial
+from functools import partial, wraps
 
 import torch
 from torch import nn
 
-from ..base.typing import Callable, Ts, Numeric, overload, cast
+from .param_transform import Transform
+from ..base.serialize import AsJsonMixIn
+from ..base.typing import Callable, Ts, cast
 
 __all__ = [
     'DeviceMixIn',
     'DtypeMixIn',
+    'EnhancedModule',
     'ParamTransformModule',
     'TensorContainerMixIn',
-    'Transforms',
     'WrapperModule',
 ]
 
@@ -48,7 +50,6 @@ class WrapperModule(nn.Module):
 
 
 _unset = object()
-Transform = Callable[[Ts], Ts]
 
 
 class ParamTransformModule(nn.Module):
@@ -62,16 +63,13 @@ class ParamTransformModule(nn.Module):
     must be given to compute the latent value. If a parameter with same name has been
     registered already, it will be automatically converted to a transformed parameter.
     Specifying a transformation for existent parameter by calling :meth:`.set_transform`
-    has same effect.
-
-    All transformations and their inversion should be a callable object
-    that takes a single tensor as input and returns a single tensor.
+    has same effect. Transformations are specified in the form of a :class:`Transform` instance.
 
     .. note::
-        **Implementation detail** The latent value of each transformed parameter is
+        **Implementation Detail** The latent value of each transformed parameter is
         a :class:`torch.nn.Parameter` attribute with name like ``_latent_<param>``.
     """
-    _param_transforms: dict[str, tuple[Transform | None, Transform | None]]
+    _param_transforms: dict[str, Transform]
 
     def __getattr__(self, name: str):
         param_transforms = cast(dict, self.__dict__.get('_param_transforms', _unset))
@@ -80,7 +78,7 @@ class ParamTransformModule(nn.Module):
 
         latent_name = self._latent_name(name)
         if name in param_transforms:
-            return param_transforms[name][0](super().__getattr__(latent_name))
+            return param_transforms[name].transform(super().__getattr__(latent_name))
         else:
             return super().__getattr__(name)
 
@@ -92,12 +90,12 @@ class ParamTransformModule(nn.Module):
         latent_name = self._latent_name(name)
         if name in param_transforms:
             transform = param_transforms[name]
-            if transform[1] is None:
+            if not transform.invertible:
                 raise RuntimeError(f'No inverse transformation specified for transformed parameter {name} '
                                    f'so it cannot be assigned. Assign to its latent "{latent_name}" '
                                    f'if you intend to modify its value directly.')
             else:
-                super().__setattr__(latent_name, transform[1](value))
+                super().__setattr__(latent_name, transform.inverse(value))
         else:
             return super().__setattr__(name, value)
 
@@ -114,72 +112,45 @@ class ParamTransformModule(nn.Module):
             return super().__delattr__(name)
 
     def register_parameter(
-        self, name: str, param: nn.Parameter | None, transform: Transform = None, inverse: Transform = None,
+        self, name: str, param: nn.Parameter | None, transform: Transform = None
     ) -> None:
         """
         Similar to :meth:`torch.nn.Module.register_parameter`, but allows you to register a transformed
-        parameter as long as ``transform`` and ``inverse`` are given.
+        parameter as long as ``transform`` is given.
 
         If ``name`` corresponds to a vanilla parameter (i.e. not transformed parameter)
-        it will be converted to a transformed one.
+        but ``transform`` is given, it will be converted to a transformed one.
 
         :param str name: Name of the parameter.
         :param Parameter param: Nominal :class:`torch.nn.Parameter` instance to be registered.
-        :param transform: Transformation to calculate nominal value from latent value.
-        :param inverse: Inverse transformation to calculate latent value from nominal value.
+        :param Transform transform: Transformation object.
         """
         if transform is None:
-            if inverse is None:
-                return super().register_parameter(name, param)
-            else:
-                raise ValueError(f'transform cannot be None for transformed parameter {name}')
-        elif inverse is None:
+            return super().register_parameter(name, param)
+        if not transform.invertible:
             raise ValueError(f'Inverse transformation cannot be None when registering parameter {name} '
                              f'with transformation given. Call register_latent_parameter to register '
                              f'a transformed parameter without inverse transformation.')
 
         if param is not None:
-            param.data = inverse(param.data)
-        return self.register_latent_parameter(name, param, transform, inverse=inverse)
-
-    @overload
-    def register_latent_parameter(
-        self, name: str, param: nn.Parameter | None, fn: Transform, inverse: Transform = None
-    ):
-        pass
-
-    @overload
-    def register_latent_parameter(
-        self, name: str, param: nn.Parameter | None, fn: Callable[[Ts, ...], Ts] | str, *args, **kwargs
-    ):
-        pass
+            param.data = transform.inverse(param.data)
+        return self.register_latent_parameter(name, param, transform)
 
     def register_latent_parameter(
-        self, name: str, param: nn.Parameter | None, fn: Callable[[Ts, ...], Ts] | str, *args, **kwargs
+        self, name: str, param: nn.Parameter | None, transform: Transform
     ):
         """
         Similar to :meth:`.register_parameter`, but takes as input the latent value
         rather than nominal value. In this way, the inverse transformation need not be
         provided since the initial latent value is known.
 
-        This method has two overloaded forms:
-
-        - Accepts an inverse transformation after ``fn`` or as ``inverse`` argument;
-        - Accepts any arguments combination (``*args`` and ``**kwargs``) which will be
-          passed to ``fn`` along with latent value to calculate nominal value.
-          No inverse transformation is specified in this case.
-
         If ``name`` corresponds to a vanilla parameter (i.e. not transformed parameter)
         it will be converted to a transformed one.
 
         :param str name: Name of the parameter.
         :param Parameter param: Latent :class:`torch.nn.Parameter` instance to be registered.
-        :param fn: Transformation to calculate nominal value from latent value.
+        :param Transform transform: Transformation object.
         """
-        inverse = self._extract_inverse(*args, **kwargs)
-        if inverse is not None:
-            del kwargs['inverse']
-
         param_obj = getattr(self, name, _unset)
         if param_obj is not _unset:
             if not isinstance(param_obj, torch.nn.Parameter):
@@ -189,38 +160,26 @@ class ParamTransformModule(nn.Module):
             delattr(self, name)
 
         lt_name = self._latent_name(name)
-        self.register_parameter(lt_name, param)  # method of super class will be called finally
+        self.register_parameter(lt_name, param)  # method of super class will be called virtually
 
         transforms = self._get_transforms_dict()
-        transforms[name] = (partial(fn, *args, **kwargs), inverse)
+        transforms[name] = transform
 
-    @overload
-    def set_transform(self, name: str, fn: Transform, inverse: Transform = None):
-        pass
-
-    @overload
-    def set_transform(self, name: str, fn: Transform, *args, **kwargs):
-        pass
-
-    def set_transform(self, name: str, fn: Transform, *args, **kwargs):
+    def set_transform(self, name: str, transform: Transform):
         """
-        Set transformation, and optionally, its inversion for parameter ``name``.
+        Set transformation for parameter ``name``.
 
         If ``name`` corresponds to a vanilla parameter (i.e. not transformed parameter)
         it will be converted to a transformed one.
 
-        See :meth:`.register_latent_parameter` for overloaded forms.
-
         :param str name: Name of the parameter.
-        :param fn: Transformation to calculate nominal value from latent value.
+        :param Transform transform: Transformation object.
         """
         transforms = self._get_transforms_dict()
         if name in transforms:
             lt_name = self._latent_name(name)
-            return self.register_latent_parameter(name, getattr(self, lt_name), fn, *args, **kwargs)
-
-        inverse = self._extract_inverse(*args, **kwargs)
-        return self.register_parameter(name, getattr(self, name), fn, inverse)
+            return self.register_latent_parameter(name, getattr(self, lt_name), transform)
+        return self.register_parameter(name, getattr(self, name), transform)
 
     @property
     def nominal_values(self) -> dict[str, Ts]:
@@ -241,27 +200,26 @@ class ParamTransformModule(nn.Module):
                 name = self._nominal_name(k)
                 if name in param_transforms:
                     value = named_params.pop(k)
-                    named_params[name] = param_transforms[name][0](value)
+                    named_params[name] = param_transforms[name].transform(value)
         return named_params
 
     @property
-    def transformed_parameters(self) -> dict[str, tuple[torch.nn.Parameter, Transform, Transform | None]]:
+    def transformed_parameters(self) -> dict[str, tuple[torch.nn.Parameter, Transform]]:
         """
         A ``dict`` whose keys are names of all transformed parameters of this module.
         The value corresponding to each key is a tuple containing:
 
         - The latent value, a :class:`torch.nn.Parameter` instance;
-        - Corresponding transformation;
-        - Corresponding inverse transformation, ``None`` if it is not specified.
+        - Corresponding transformation object.
 
-        :type: dict[str, tuple[Parameter, Callable, Callable or None]]
+        :type: dict[str, tuple[Parameter, Transform]]
         """
         param_transforms = getattr(self, '_param_transforms', _unset)
         if param_transforms is _unset:
             return {}
         return {
-            name: (getattr(self, self._latent_name(name)), fn, inv)
-            for name, (fn, inv) in param_transforms
+            name: (getattr(self, self._latent_name(name)), tr)
+            for name, tr in param_transforms.items()
         }
 
     def _get_transforms_dict(self):
@@ -279,104 +237,42 @@ class ParamTransformModule(nn.Module):
     def _nominal_name(latent_name: str) -> str:
         return latent_name[8:]
 
-    @staticmethod
-    def _extract_inverse(*args, **kwargs):
-        if 'inverse' in kwargs:
-            if len(args) + len(kwargs) > 1:
-                raise ValueError(f'No more arguments is acceptable when inverse is given')
-            return kwargs['inverse']
-        elif len(args) == 1 and len(kwargs) == 0 and callable(args[0]):
-            return args[0]
-        else:
-            return None
 
+class EnhancedModule(ParamTransformModule, AsJsonMixIn):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        original_to_dict = cls.__dict__.get('to_dict', None)
+        original_from_dict = cls.__dict__.get('from_dict', None)
 
-class Transforms:
-    """
-    A namespace containing functions to create commonly used transformations
-    and their inversion for :class:`ParamTransformModule`. Each function returns
-    a 2-tuple of functions, representing a transformation and its inversion.
+        if original_to_dict is not None:
+            original_to_dict = cast(Callable, original_to_dict)
 
-    In function descriptions below, :math:`x` indicates latent value and :math:`y`
-    indicates nominal value.
-    """
+            def _wrapped_to_dict(self, keep_tensor: bool = True):
+                self: EnhancedModule
+                d = original_to_dict(self, keep_tensor)
+                tp = self.transformed_parameters
+                if len(tp) != 0:
+                    d['transformed_parameters'] = {k: (
+                        self._attr2dictitem(self._latent_name(k), keep_tensor),
+                        v[1].to_dict(keep_tensor)
+                    ) for k, v in tp.items()}
+                return d
 
-    @staticmethod
-    def scale(s: Numeric) -> tuple[Transform, Transform]:
-        """
-        Multiply the latent value by a scalar factor:
+            cls.to_dict = wraps(original_to_dict)(_wrapped_to_dict)
 
-        .. math::
-            y=sx,x=y/s
+        if original_from_dict is not None:
+            if isinstance(original_from_dict, classmethod):
+                original_from_dict = original_from_dict.__wrapped__
 
-        :param s: Scale factor :math:`s`.
-        :type s: float or Tensor
-        """
-        return lambda x: x * s, lambda y: y / s
+            def _wrapped_from_dict(clz, d: dict):
+                clz: type[EnhancedModule]
+                tp = d.pop('transformed_parameters', {})
+                obj = original_from_dict(clz, d)
+                for k, (param, transform) in tp.items():
+                    obj.register_latent_parameter(k, param, Transform.from_dict(transform))
+                return obj
 
-    @staticmethod
-    def range(min_: Numeric, max_: Numeric) -> tuple[Transform, Transform]:
-        r"""
-        Limit the range of parameter to :math:`(a,b)` using sigmoid function:
-
-        .. math::
-            y=(b-a)\sigma(x)+a,x=\sigma^{-1}(\frac{y-a}{b-a})
-
-        where :math:`\sigma(t)=\frac{1}{1+\e^{-t}}` and :math:`\sigma^{-1}(t)=\ln\frac{t}{1-t}`.
-
-        :param min_: Lower bound :math:`a`.
-        :type min_: float or Tensor
-        :param max_: Upper bound :math:`b`.
-        :type max_: float or Tensor
-        """
-        range_ = max_ - min_
-        return lambda x: min_ + range_ * x.sigmoid(), lambda y: torch.logit((y - min_) / range_)
-
-    @staticmethod
-    def positive() -> tuple[Transform, Transform]:
-        r"""
-        Force parameter to be positive using exponential function:
-
-        .. math::
-            y=\e^x,x=\ln y
-        """
-        return lambda x: x.exp(), lambda y: y.log()
-
-    @staticmethod
-    def negative() -> tuple[Transform, Transform]:
-        r"""
-        Force parameter to be negative using exponential function:
-
-        .. math::
-            y=-\e^x,x=\ln -y
-        """
-        return lambda x: -x.exp(), lambda y: y.neg().log()
-
-    @staticmethod
-    def gt(limit: Numeric) -> tuple[Transform, Transform]:
-        r"""
-        Force parameter to be greater than :math:`a` using exponential function:
-
-        .. math::
-            y=a+\e^x,x=\ln(y-a)
-
-        :param limit: Lower bound :math:`a`.
-        :type limit: float or Tensor
-        """
-        return lambda x: limit + x.exp(), lambda y: torch.log(y - limit)
-
-    @staticmethod
-    def lt(limit: Numeric) -> tuple[Transform, Transform]:
-        r"""
-        Force parameter to be less than :math:`b` using exponential function:
-
-        .. math::
-            y=b-\e^x,x=\ln(b-y)
-
-        :param limit: Upper bound :math:`b`.
-        :type limit: float or Tensor
-        """
-        return lambda x: limit - x.exp(), lambda y: torch.log(limit - y)
+            cls.from_dict = classmethod(wraps(original_from_dict)(_wrapped_from_dict))
 
 
 def _check_consistency(attr: str, obj, ts: Ts, error: bool) -> bool:

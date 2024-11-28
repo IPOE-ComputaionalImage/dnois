@@ -60,9 +60,9 @@ class _SphericalBase(CircularSurface, metaclass=abc.ABCMeta):  # docstring for S
         super().__init__(material, distance, aperture, newton_config)
         self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
 
-    def to_dict(self) -> dict[str, Any]:
-        d = super().to_dict()
-        d['roc'] = self.roc.item()
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
+        d = super().to_dict(keep_tensor)
+        d['roc'] = self._attr2dictitem('roc', keep_tensor)
         return d
 
     @property
@@ -133,9 +133,9 @@ class _ConicBase(_SphericalBase, metaclass=abc.ABCMeta):  # docstring for Conic
     def h_derivative_r2(self, r2: Ts) -> Ts:
         return _spherical_der_wrt_r2(r2, 1 / self.roc, self.conic)
 
-    def to_dict(self) -> dict[str, Any]:
-        d = super().to_dict()
-        d['conic'] = self.conic.item()
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
+        d = super().to_dict(keep_tensor)
+        d['conic'] = self._attr2dictitem('conic', keep_tensor)
         return d
 
     @property
@@ -230,9 +230,9 @@ class EvenAspherical(_ConicBase):
             a_der = a_der * r2 + self.coefficients[i - 1] * i
         return s_der + a_der
 
-    def to_dict(self) -> dict[str, Any]:
-        d = super().to_dict()
-        d['coefficients'] = [c.item() for c in self.coefficients]
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
+        d = super().to_dict(keep_tensor)
+        d['coefficients'] = self.coefficients if keep_tensor else [c.item() for c in self.coefficients]
         return d
 
     @property
@@ -342,7 +342,7 @@ class PlanarPhase(Planar):
         ray.update_valid_(ndz2 >= 0)
         return ray
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         raise NotImplementedError()
 
     @property

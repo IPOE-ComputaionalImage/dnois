@@ -7,12 +7,13 @@ import torch
 from .typing import Any
 
 __all__ = [
+    'AsDictMixIn',
     'AsJsonMixIn',
 ]
 
 
 class AsDictMixIn:
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, keep_tensor: bool = True) -> dict[str, Any]:
         """
         Converts ``self`` into a ``dict`` which recursively contains only primitive Python objects.
 
@@ -26,16 +27,16 @@ class AsDictMixIn:
         cls: type
         return cls(**d)
 
-    def _attr2dictitem(self, name: str):
+    def _attr2dictitem(self, name: str, keep_tensor: bool = True):
         converter = getattr(self, '_todict_' + name, None)
         if converter is not None and callable(converter):
-            return converter()
+            return converter(keep_tensor)
 
         attr = getattr(self, name)
         if isinstance(attr, AsDictMixIn):
-            return attr.to_dict()
+            return attr.to_dict(keep_tensor)
 
-        if torch.is_tensor(attr):
+        if torch.is_tensor(attr) and not keep_tensor:
             if attr.numel() > 100:
                 warnings.warn(f'Trying to convert a too large tensor (numel={attr.numel()}) to a list')
             attr = attr.tolist()
@@ -44,13 +45,22 @@ class AsDictMixIn:
 
 
 class AsJsonMixIn(AsDictMixIn):
+    def to_json(self, **kwargs) -> str:
+        """
+        Converts ``self`` into a JSON string.
+
+        :keyword kwargs: Keyword arguments passed to :func:`json.dumps`.
+        :rtype: str
+        """
+        return json.dumps(self.to_dict(False), **kwargs)
+
     def save_json(self, fp, **kwargs):
         """
         Save ``self`` into a JSON file-like object ``fp``.
 
         :keyword kwargs: Keyword arguments passed to :func:`json.dump`.
         """
-        return json.dump(self.to_dict(), fp, **kwargs)
+        return json.dump(self.to_dict(False), fp, **kwargs)
 
     @classmethod
     def load_json(cls, file, **kwargs):

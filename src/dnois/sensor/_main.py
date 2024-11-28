@@ -276,7 +276,7 @@ class SimpleSensor(nn.Module):
             )
         if rgb:
             srf = _make_srf(srf, bayer_pattern)  # 4 x N_wl
-        self.register_buffer('srf', srf, False)
+        self.register_buffer('srf', srf)
 
     def forward(self, radiance: Ts) -> Ts:
         """

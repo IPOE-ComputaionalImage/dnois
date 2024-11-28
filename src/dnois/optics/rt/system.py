@@ -666,9 +666,11 @@ class SequentialRayTracing(RenderingOptics):
         psf_center: PsfCenter,
         sampling_mode: str = None,
         sampling_args: Any = None,
-    ) -> Ts:
+        vignette: bool = True,
+    ) -> Ts:  # This method is completely correct (annotated by GJQ, 20241126 20:23)
         sampling_mode = self.pick('sampling_mode', sampling_mode)
         sampling_args = self.pick('sampling_args', sampling_args)
+        vignette = self.pick('vignette', vignette)
 
         sampled = self.surfaces.first.sample(sampling_mode, *sampling_args)  # N_spp x 3
         n_spp = sampled.size(0)
@@ -709,10 +711,14 @@ class SequentialRayTracing(RenderingOptics):
         psf.index_put_(pre_idx + [r_a, c_as], torch.where(mask, w_c * iw_r, 0), True)  # bottom left
         psf.index_put_(pre_idx + [r_as, c_a], torch.where(mask, iw_c * w_r, 0), True)  # top right
         psf.index_put_(pre_idx + [r_a, c_a], torch.where(mask, iw_c * iw_r, 0), True)  # bottom right
-        psf = psf[..., :-2, :-2] / n_spp
+        psf = psf[..., :-2, :-2]
+
+        if vignette:
+            psf = psf / n_spp
+        else:
+            psf = psf / psf.sum((-2, -1), True)
 
         psf = psf.flip(-1)
-        psf = psf / psf.sum((-2, -1), True)
         return psf
 
     # This method is adapted from
