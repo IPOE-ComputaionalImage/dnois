@@ -680,6 +680,7 @@ class SequentialRayTracing(RenderingOptics):
         ray.norm_d_()
 
         out_ray = self._obj2img(ray)  # ... x N_wl x N_spp
+        out_ray.update_valid_(~out_ray.x.isnan() & ~out_ray.y.isnan())
 
         if psf_center == 'linear':
             xy_center = self.obj_proj_lens(origins)[..., None, None, :]  # ... x 1 x 1 x 2
@@ -818,8 +819,8 @@ class SequentialRayTracing(RenderingOptics):
         du2, dv2 = range_u / new_u_num, range_v / new_v_num
 
         # bilinear interpolation
-        new_v, new_u = utils.sym_grid(
-            2, (new_v_num, new_u_num), (dv2, du2), True, dtype=self.dtype, device=self.device,
+        new_v, new_u = utils.grid(
+            (new_v_num, new_u_num), (dv2, du2), symmetric=True, dtype=self.dtype, device=self.device,
         )  # ... x N_wl x MH x MW
         new_r = new_v / dv[..., None, None] + (grid_size - 1) / 2
         new_c = new_u / du[..., None, None] + (grid_size - 1) / 2

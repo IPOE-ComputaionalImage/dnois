@@ -10,6 +10,10 @@ __all__ = ['Transform']
 
 TransFn = Callable[[Ts], Ts]
 
+def _tensor(x:Numeric)->Ts:
+    if not isinstance(x, float) and not torch.is_tensor(x):
+        return torch.tensor(x)
+
 
 class Transform(AsJsonMixIn):
     """
@@ -39,7 +43,7 @@ class Transform(AsJsonMixIn):
 
     def __init__(self, fn: TransFn, *args, **kwargs):
         if self.__class__ is Transform and fn is None:
-            raise TypeError("Transform must not be None")
+            raise TypeError("Transform function fn must not be None")
         inverse = self._extract_inverse(*args, **kwargs)
         self._transform = partial(fn, *args, **kwargs) if inverse is None and fn is not None else fn
         self._inverse = inverse
@@ -148,6 +152,17 @@ class Transform(AsJsonMixIn):
         return Lt(limit)
 
     @staticmethod
+    def composite(*transforms:'Transform') -> 'Transform':
+        r"""
+        Chain some transformations into a single transformation.
+        Resulted transformation is to apply all the transformations sequentially
+        and resulted inverse transformation is to apply all the inversions in a reversed order.
+
+        :param Transform transforms: One or more transformations to apply.
+        """
+        return Composite(*transforms)
+
+    @staticmethod
     def _extract_inverse(*args, **kwargs):
         if 'inverse' in kwargs:
             if len(args) + len(kwargs) > 1:
@@ -162,8 +177,8 @@ class Transform(AsJsonMixIn):
 # These classes are keep not public to make namespace clean
 class Scale(Transform):
     def __init__(self, s: Numeric):
-        super().__init__(cast(Any, None))
-        self._s = s
+        super().__init__(cast(Callable, None))
+        self._s = _tensor(s)
 
     def transform(self, x: Ts) -> Ts:
         return x * self._s
@@ -180,9 +195,9 @@ class Scale(Transform):
 
 class Range(Transform):
     def __init__(self, min_: Numeric, max_: Numeric):
-        super().__init__(cast(Any, None))
-        self._min = min_
-        self._range = max_ - min_
+        super().__init__(cast(Callable, None))
+        self._min = _tensor(min_)
+        self._range = _tensor(max_) - self._min
 
     def transform(self, x: Ts) -> Ts:
         return self._min + self._range * x.sigmoid()
@@ -201,8 +216,8 @@ class Range(Transform):
 
 class Gt(Transform):
     def __init__(self, limit: Numeric = None):
-        super().__init__(cast(Any, None))
-        self._limit = limit
+        super().__init__(cast(Callable, None))
+        self._limit = _tensor(limit)
 
     def transform(self, x: Ts) -> Ts:
         return x.exp() if self._limit is None else self._limit + x.exp()
@@ -219,8 +234,8 @@ class Gt(Transform):
 
 class Lt(Transform):
     def __init__(self, limit: Numeric = None):
-        super().__init__(cast(Any, None))
-        self._limit = limit
+        super().__init__(cast(Callable, None))
+        self._limit = _tensor(limit)
 
     def transform(self, x: Ts) -> Ts:
         return -x.exp() if self._limit is None else self._limit - x.exp()
@@ -233,3 +248,29 @@ class Lt(Transform):
             'type': self.__class__.__name__,
             'limit': self._attr2dictitem('_limit', keep_tensor),
         }
+
+
+class Composite(Transform):
+    def __init__(self, *transforms: Transform):
+        super().__init__(cast(Callable, None))
+        self._transforms = transforms
+
+    def transform(self, x: Ts) -> Ts:
+        for t in self._transforms:
+            x = t.transform(x)
+        return x
+
+    def inverse(self, y: Ts) -> Ts:
+        for t in reversed(self._transforms):
+            y = t.inverse(y)
+        return y
+
+    def to_dict(self, keep_tensor: bool = True) -> dict[str, Any]:
+        return {
+            'type': self.__class__.__name__,
+            'transforms': [t.to_dict(keep_tensor) for t in self._transforms]
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        return cls(*[Transform.from_dict(item) for item in d['transforms']])

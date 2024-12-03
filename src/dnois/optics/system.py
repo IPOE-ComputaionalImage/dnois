@@ -423,21 +423,16 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
             raise ValueError(f'A scene with {wl.numel()} wavelengths expected, '
                              f'got {scene.n_wl}')
         if scene.depth_aware:
-            warnings.warn(f'Depth-aware rendering is not supported currently for {self.__class__.__name__}')
+            warnings.warn(f'Depth-aware rendering is not supported currently '
+                          f'for {self.patchwise_render.__qualname__}')
 
         scene = scene.batch()
-        rm = self.reference
         n_b, n_wl, n_h, n_w = scene.image.shape
 
         if not (torch.is_tensor(depth) and depth.numel() == 1):
             depth = torch.stack([self.random_depth(depth) for _ in range(n_b)])  # B(1)
-        tanfov_y, tanfov_x = utils.sym_grid(
-            2, segments, (2 / segments[0], 2 / segments[1]), True, device=self.device, dtype=self.dtype
-        )
-        tanfov_x, tanfov_y = tanfov_x * math.tan(rm.fov_half_x), tanfov_y * math.tan(rm.fov_half_y)
-        tanfov_x, tanfov_y = torch.broadcast_tensors(tanfov_x, tanfov_y)  # N_x x N_y
         # B(1) x N_x x N_y
-        obj_points = self.tanfovd2obj(torch.stack([tanfov_x, tanfov_y], -1), depth.view(-1, 1, 1))
+        obj_points = self.points_grid(cast(tuple[int, int], segments), depth.flatten())
 
         psf = self.psf(obj_points, psf_size, wl, **kwargs)  # B(1) x N_x x N_y x N_wl x H x W
 
@@ -543,6 +538,32 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
                     raise ShapeError(f'probabilities must be a 1D tensor')
                 idx = torch.multinomial(probabilities, 1).squeeze().item()
             return depth[idx]
+
+    def points_grid(self, segments: Size2d, depth: float | Ts) -> Ts:
+        """
+        Creates some points in object space, each of which is mapped to the center of
+        one of non-overlapping patches on the image plane by perspective projection.
+
+        :param segments: Number of patches in vertical (``N_y``) and horizontal (``N_x``) directions.
+        :type segments: int or tuple[int, int]
+        :param depth: Depth of resulted points. A ``float`` or a tensor of any shape ``(...)``.
+        :type depth: float or Tensor
+        :return: A tensor of shape ``(..., N_y, N_x, 3)`` representing the coordinates of points in
+            :ref:`camera's coordinate system <guide_imodel_cameras_coordinate_system>`.
+        :rtype: Tensor
+        """
+        segments = size2d(segments)
+        if not torch.is_tensor(depth):
+            depth = self.new_tensor(depth)
+
+        rm = self.reference
+        tanfov_y, tanfov_x = utils.grid(
+            segments, (2 / segments[0], 2 / segments[1]), symmetric=True, device=self.device, dtype=self.dtype
+        )
+        tanfov_x, tanfov_y = tanfov_x * math.tan(rm.fov_half_x), tanfov_y * math.tan(rm.fov_half_y)
+        tanfov_x, tanfov_y = torch.broadcast_tensors(tanfov_x, tanfov_y)  # N_x x N_y
+        # ... x N_x x N_y
+        return self.tanfovd2obj(torch.stack([tanfov_x, tanfov_y], -1), depth[..., None, None])
 
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         d = {k: self._attr2dictitem(k, keep_tensor) for k in self._inherent}

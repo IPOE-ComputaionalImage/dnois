@@ -21,7 +21,7 @@ Functionalities for module
 
     WrapperModule
     ParamTransformModule
-    Transforms
+    Transform
 
 *********************************
 Tensor operation

@@ -95,7 +95,7 @@ def _init_ft_common(
         raise ValueError(f'Unknown delta_mode: {delta_mode}')
     # shape of deltas at present: (,) or (...,N_d,N_wl)
     cache = {'du': du[..., None, None], 'dv': dv[..., None, None]}  # add two more dim for ft
-    v, u = utils.sym_grid(2, grid_size, (dv, du))
+    v, u = utils.grid(grid_size, (dv, du))
 
     wl = vector(wl)
     distance = vector(distance)
@@ -109,7 +109,7 @@ def _init_ft_common(
             cache['quadratic_phase_factor'] = _t.expi(quadratic_phase)
 
     if phase_factor:
-        y, x = utils.sym_grid(2, grid_size, (dy, dx))
+        y, x = utils.grid(grid_size, (dy, dx))
         _post_phase = phase_scale[..., None, None] * (x.square() + y.square())
         _post_phase += 2 * torch.pi * distance.unsqueeze(-4) / wl - torch.pi / 2
         cache['phase_factor'] = _t.expi(_post_phase)
@@ -133,7 +133,7 @@ def _init_as_common(
     grid_size = size2d(grid_size)
     dfy = 1 / (grid_size[0] * dy)
     dfx = 1 / (grid_size[1] * dx)
-    fy, fx = utils.sym_grid(2, grid_size, (dfy, dfx))
+    fy, fx = utils.grid(grid_size, (dfy, dfx))
     rou2 = fx.square() + fy.square()
 
     wl = vector(wl)
@@ -187,7 +187,7 @@ def _init_conv_common(
     k = 2 * torch.pi / wl
     distance = vector(distance).reshape(-1, 1, 1, 1)
 
-    v, u = utils.sym_grid(2, ksize, (dy, dx))
+    v, u = utils.grid(ksize, (dy, dx))
     lateral_r2 = v.square() + u.square()
     wl_d_prod = wl * distance
     if paraxial:  # fresnel
@@ -1165,7 +1165,7 @@ class Diffraction(_t.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
             dim = 0 if item[0] == 'v' or item[0] == 'y' else 1
             size = self._grid_size[dim]
             if len(item) == 1:  # u/v/x/y
-                axis = utils.sym_interval(size, spacing.unsqueeze(-1))
+                axis = utils.interval(size, spacing.unsqueeze(-1))
                 return axis.unsqueeze(-1 - dim)  # 1 x W for u/x or H x 1 for v/y
             elif item[2] == 'r':  # range
                 return -spacing * (size // 2), spacing * ((size - 1) // 2)

@@ -8,6 +8,7 @@ from . import (
     optics,
     scene,
     sensor,
+    torch,
     utils
 )
 from .base import *

@@ -252,8 +252,8 @@ class CircularAperture(Aperture):
         :rtype: tuple[Tensor, Tensor]
         """
         h, w = size2d(n)
-        y, x = utils.sym_grid(
-            2, (h, w), (2 * self.radius / h, 2 * self.radius / w), True,
+        y, x = utils.grid(
+            (h, w), (2 * self.radius / h, 2 * self.radius / w), symmetric=True,
             device=self.device, dtype=self.dtype
         )
         y, x = torch.broadcast_tensors(y, x)

@@ -9,8 +9,8 @@ Creating grid
 .. autosummary::
     :toctree: ../generated/utils/grid
 
-    sym_grid
-    sym_interval
+    grid
+    interval
 
 *****************************
 Image manipulation

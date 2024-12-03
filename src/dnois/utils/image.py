@@ -94,9 +94,9 @@ def partition(
 
     :param Tensor image: One or more images of shape ... x H x W.
     :param n_patches: Number of patches in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type n_patches: int | tuple[int, int]
     :param overlap: Overlapping width in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type overlap: int | tuple[int, int]
     :param bool sequential: Whether to arrange all patches into one dimension.
     :return: Image patches of shape ``patches[0]`` x ``patches[1]`` x ... x PH x PW
         or (``patches[0]`` x ``patches[1]``) x ... x PH x PW, depending on ``sequential``
@@ -143,12 +143,12 @@ def partition_padded(
 
     :param Tensor image: One or more images of shape ... x H x W.
     :param n_patches: Number of patches in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type n_patches: int | tuple[int, int]
     :param padding: Padding width in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type padding: int | tuple[int, int]
     :param str mode: See :func:``torch.nn.functional.pad``.
     :param value: See :func:``torch.nn.functional.pad``.
-    :type: int | float
+    :type value: int | float
     :param bool sequential: Whether to arrange all patches into one dimension.
     :return: Image patches of shape patches[0] x patches[1] x ... x PH x PW
         or (patches[0] x patches[1]) x ... x PH x PW, depending on ``sequential``
@@ -173,9 +173,9 @@ def merge_patches(
     :param patches: Either a tensor of shape PR x PC x ... x PH x PW or a 2d list composed of
         tensors of shape ... x PH x PW, wherein PR, PC are numbers of patches in vertical and
         horizontal direction and PH, PW are height and width of each patch, respectively.
-    :type: Tensor | list[list[Tensor]]
+    :type patches: Tensor | list[list[Tensor]]
     :param overlap: Overlapping width in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type overlap: int | tuple[int, int]
     :param merge_method: The method used to determine the values of overlapping pixels.
 
         ``avg``
@@ -187,7 +187,7 @@ def merge_patches(
         ``slope``
             In each overlapping position, pixels of involved patches are averaged
             where the component closer to its patches has larger weights.
-    :type: Literal['avg', 'crop', 'slope']
+    :type merge_method: Literal['avg', 'crop', 'slope']
     :return: A resulted image of shape ... x H x W.
     :rtype: Tensor
     """
@@ -218,7 +218,7 @@ def crop(image: Ts, cropping: Size2d) -> Ts:
 
     :param Tensor image: The image to be cropped.
     :param cropping: Cropping width in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type cropping: int | tuple[int, int]
     :return: Cropped image.
     :rtype: Tensor
     """
@@ -234,7 +234,7 @@ def pad(image: Ts, padding: Size2d, mode: str = 'constant', value: float = 0) ->
 
     :param Tensor image: The image to be padded.
     :param padding: Padding width in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type padding: int | tuple[int, int]
     :param str mode: See :py:func:`torch.nn.functional.pad`.
     :param float value: See :py:func:`torch.nn.functional.pad`.
     :return: Padded image.
@@ -252,7 +252,7 @@ def resize(image: Ts, target_size: Size2d, mode: str = 'constant', value: float 
 
     :param Tensor image: The image to be resized.
     :param target_size: Target size in vertical and horizontal direction.
-    :type: int | tuple[int, int]
+    :type target_size: int | tuple[int, int]
     :param str mode: See :py:func:`torch.nn.functional.pad`.
     :param float value: See :py:func:`torch.nn.functional.pad`.
     :return: Resized image with given size.
