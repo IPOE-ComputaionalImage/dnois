@@ -1,4 +1,3 @@
-import json
 import math
 import warnings
 
@@ -7,11 +6,11 @@ import torch
 
 from . import surf, SurfaceList
 from .ray import BatchedRay
-from ..system import RenderingOptics, Pinhole
+from ..system import RenderingOptics
 from ... import scene as _sc, base, utils, fourier, torch as _t
 from ...base import typing
 from ...base.typing import (
-    Ts, Any, IO, Size2d, Vector, SclOrVec, Scalar, Self, PsfCenter,
+    Ts, Any, Size2d, Vector, SclOrVec, Scalar, Self, PsfCenter,
     scalar
 )
 
@@ -80,6 +79,7 @@ def _make_direction(sampled_point: Ts, origin: Ts, normalize: bool = False) -> t
 class SequentialRayTracing(RenderingOptics):
     """
     A class of sequential and ray-tracing-based optical system model.
+
     See :class:`~dnois.optics.RenderingOptics` for descriptions of more arguments.
 
     .. note::
@@ -118,6 +118,7 @@ class SequentialRayTracing(RenderingOptics):
         for coherent tracing. Default: 512.
     :param str coherent_tracing_sampling_pattern: Sampling pattern for coherent tracing.
         Default: ``'quadrapolar'``.
+    :param kwargs: Additional keyword arguments passed to :class:`RenderingOptics`.
     """
     _inherent = RenderingOptics._inherent + ['surfaces']
     _external = RenderingOptics._external + [
@@ -130,7 +131,7 @@ class SequentialRayTracing(RenderingOptics):
         surfaces: surf.SurfaceList,
         pixel_num: Size2d,
         pixel_size: float | tuple[float, float],
-        image_distance: float = None,
+        image_distance: float,
         psf_type: str = 'simple_incoherent',
         psf_center: PsfCenter = 'linear',
         sampling_mode: str = 'random',
@@ -378,12 +379,6 @@ class SequentialRayTracing(RenderingOptics):
             z = self.new_tensor(z)
         return self.principal1 - z
 
-    @property
-    def reference(self) -> Pinhole:
-        if self.image_distance is None:
-            raise NotImplementedError()
-        return Pinhole(self.image_distance, self.pixel_num, self.pixel_size)
-
     # Optical parameters
     # =============================
 
@@ -585,6 +580,7 @@ class SequentialRayTracing(RenderingOptics):
 
             This method is subject to change.
         """
+        depth = self.pick('depth', depth)
         sampling_mode = self.pick('sampling_mode', sampling_mode)
         sampling_args = self.pick('sampling_args', sampling_args)
         vignette = self.pick('vignette', vignette)
@@ -600,24 +596,10 @@ class SequentialRayTracing(RenderingOptics):
 
         scene = scene.batch()
         device = self.device
-        rm = self.reference
         n_b, n_wl, n_h, n_w = scene.image.shape
 
-        depth_map = None  # B x H x W
-        if scene.depth_aware:
-            if self.depth_aware:
-                depth_map = scene.depth
-            else:
-                warnings.warn(f'Trying to render a depth-aware image by an instance of '
-                              f'{self.__class__.__name__} that does not support it')
-        if depth_map is None:
-            depth_map = torch.stack([self.sample_depth(depth) for _ in range(n_b)])
-            depth_map = depth_map.reshape(-1, 1, 1).expand(-1, n_h, n_w)
-        x = torch.linspace(-1, 1, n_w, device=device).unsqueeze(0)
-        x = x * math.tan(rm.fov_half_x)  # 1 x W
-        y = torch.linspace(-1, 1, n_h, device=device).unsqueeze(-1)
-        y = y * math.tan(rm.fov_half_y)  # H x 1
-        o = self.tanfovd2obj(torch.stack(torch.broadcast_tensors(x, y), -1), depth_map)  # B x H x W x 3
+        depth_map = self._make_depth_map(scene, depth)  # B x H x W
+        o = self.points_grid((n_h, n_w), depth_map, True)  # B x H x W x 3
         o = self.camera2lens(o)  # B x H x W x 3
 
         points = self.surfaces.first.sample(sampling_mode, *sampling_args)  # N_spp x 3

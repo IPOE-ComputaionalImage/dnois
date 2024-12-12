@@ -12,9 +12,8 @@ Note that optical response is not always specified by PSF. For example,
 a group of rays can dictate rendering process as well in ray-tracing-based
 systems.
 """
-# from .df import *
+from ._func import *
 from .formation import *
-# from .rt import *
 from .system import *
 
 from . import df, formation, rt, system

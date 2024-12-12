@@ -3,6 +3,7 @@ TODO: Description
 """
 
 from . import (
+    depth,
     fourier,
     mt,
     optics,

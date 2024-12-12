@@ -19,6 +19,7 @@ TODO
 .. autosummary::
     :toctree: ../generated/optics/abstract
 
+    IdealOptics
     Pinhole
     RenderingOptics
     StandardOptics
@@ -47,4 +48,20 @@ TODO: description
 .. autosummary::
     :toctree: ../generated/optics/formation
 
+    simple
+    depth_aware
     space_variant
+    superpose
+
+**************************************
+Optics
+**************************************
+TODO: description
+
+.. autosummary::
+    :toctree: ../generated/optics/o
+
+    circle_of_confusion
+    imgd
+    objd
+    norm_psf

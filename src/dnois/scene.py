@@ -46,7 +46,7 @@ class ImageScene(Scene):
             raise ShapeError(f'Image with shape {i_shape} expected, got {image.shape}')
         if depth is not None:
             d_ndim = 2 + bool(batched)
-            d_shape = f'({"B, " if batched else ""}C, H, W)'
+            d_shape = f'({"B, " if batched else ""}H, W)'
             if depth.ndim != d_ndim:
                 raise ShapeError(f'Depth map with shape {d_shape} expected, got {depth.shape}')
             if image.shape[-2:] != depth.shape[-2:]:
@@ -100,7 +100,7 @@ class ImageScene(Scene):
         else:
             return ImageScene(
                 self._image.unsqueeze(0),
-                self._depth.unsqueeze(0),
+                None if self._depth is None else self._depth.unsqueeze(0),
                 self._intrinsic, self._polarized, True
             )
 

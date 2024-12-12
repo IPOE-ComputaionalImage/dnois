@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as functional
 
-from dnois.base.typing import Size2d, Union, Literal, Ts, size2d
+from ..base.typing import Size2d, Union, Literal, Ts, size2d
 
 __all__ = [
     'crop',
