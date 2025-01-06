@@ -547,7 +547,7 @@ def dispersion_types(name_only: bool = False) -> list[type[Material]] | list[str
 
     :param bool name_only: If ``True``, returns class names, otherwise returns class objects.
     :return: A list of subclasses of :class:`.Material`.
-    :rtype: list[type[Material]]
+    :rtype: list[type[Material]] or list[str]
     """
     sub_list = utils.subclasses(Material)
     if name_only:

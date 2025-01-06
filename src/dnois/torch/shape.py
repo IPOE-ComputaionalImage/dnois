@@ -1,11 +1,32 @@
 import torch
 
+from ..base import typing, ShapeError
 from ..base.typing import Ts, Sequence, overload
 
 __all__ = [
     'as1d',
     'broadcastable',
+    'check_nd_vector',
+    'check_3d_vector',
+    'check_2d_vector',
+
+    'ShapeError',
 ]
+
+
+def check_nd_vector(ts: Ts, ndim: int, name: str = None):
+    if name is None:
+        name = f'a {ndim}d vector'
+    if ts.ndim < 1 or ts.size(-1) != ndim:
+        raise ShapeError(f'Size of last dimension of {name} must be {ndim}, got shape {ts.shape}')
+
+
+def check_3d_vector(ts: Ts, name: str = 'a 3d vector'):
+    return check_nd_vector(ts, 3, name)
+
+
+def check_2d_vector(ts: Ts, name: str = 'a 2d vector'):
+    return check_nd_vector(ts, 2, name)
 
 
 def as1d(x: Ts, ndim: int = 1, dim: int = -1) -> Ts:

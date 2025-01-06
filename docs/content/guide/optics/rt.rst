@@ -9,3 +9,10 @@ TODO
 Lens' coordinate system
 ********************************************
 TODO
+
+.. _guide_optics_rt_slcs:
+
+************************************************
+Surface-local coordinate system
+************************************************
+TODO

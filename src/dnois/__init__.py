@@ -13,3 +13,5 @@ from . import (
     utils
 )
 from .base import *
+
+from .torch.calc import *

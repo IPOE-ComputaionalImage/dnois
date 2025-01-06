@@ -3,12 +3,13 @@ import importlib.resources
 
 import torch
 
-from . import unit as u
+from . import unit as u, exception
 from .typing import Numeric, Ts, overload
 
 __all__ = [
     'fline',
     'fraunhofer_line',
+    'reflect',
     'refract',
     'wave_vec',
 ]
@@ -128,15 +129,82 @@ def refract(incident: Ts, normal: Ts, n1: Numeric, n2: Numeric) -> Ts:
 
 
 def refract(incident: Ts, normal: Ts, n1: Numeric, n2: Numeric = None) -> Ts:
-    ni = torch.sum(normal * incident, -1, True)  # inner product
-    n1 = _as_tensor(n1, ni)
+    r"""
+    Computes direction of refractive ray given that of incident ray,
+    normal vector and refractive indices. In descriptions below,
+    subscript 1 means incident media and 2 means refractive media.
+    All vectors have unit length. :math:`\mathbf{d}` indicates
+    directions of rays and :math:`\mathbf{n}` indicates normal vector.
+
+    This function has two overloaded forms:
+
+    -   If relative refractive index :math:`\mu=n_1/n_2` is given, returns
+
+        .. math::
+
+            \mathbf{d}_2=\mu\mathbf{d}_1
+            +\sqrt{1-\mu^2[1-(\mathbf{n}\cdot\mathbf{d}_1)^2]}\mathbf{n}
+            -\mu(\mathbf{n}\cdot\mathbf{d}_1)\mathbf{n}
+
+    :param Tensor incident: Incident *direction* :math:`\mathbf{d}_1`. A tensor of shape ``(..., 3)``.
+    :param Tensor normal: Normal vector :math:`\mathbf{n}`. A tensor of shape ``(..., 3)``.
+    :param mu: Relative refractive index :math:`\mu`. A float or a tensor of shape ``(...)``.
+    :type mu: float or Tensor
+    :return: Refractive *direction* :math:`\mathbf{d}_2`. A tensor of shape ``(..., 3)``.
+    :rtype: Tensor
+
+    -   If refractive indices in incident and refractive media :math:`n_1`,
+        :math:`n_2` are given, returns
+
+        .. math::
+
+            n_2\mathbf{d}_2=n_1\mathbf{d}_1+
+            \left[\sqrt{n_2^2-n_1^2+(\mathbf{n}\cdot n_1\mathbf{d}_1)^2}
+            -(\mathbf{n}\cdot n_1\mathbf{d}_1)\right]\mathbf{n}
+
+    :param Tensor incident: Incident *ray vector* :math:`n_1\mathbf{d}_1`. A tensor of shape ``(..., 3)``.
+    :param Tensor normal: Normal vector :math:`\mathbf{n}`. A tensor of shape ``(..., 3)``.
+    :param n1: Refractive index :math:`n_1`. A float or a tensor of shape ``(...)``.
+    :type n1: float or Tensor
+    :param n2: Refractive index :math:`n_2`. A float or a tensor of shape ``(...)``.
+    :type n2: float or Tensor
+    :return: Refractive *ray vector* :math:`n_2\mathbf{d}_2`. A tensor of shape ``(..., 3)``.
+    :rtype: Tensor
+
+    .. hint::
+
+        ``n1``, ``n2`` and ``mu`` can be negative.
+    """
+    ni = torch.sum(normal * incident, -1, True)  # inner product, ... x 1
+    if ni.lt(0).any():
+        raise exception.PhysicsError('The angle between normal vector and incident ray is not acute.')
+    n1 = _as_tensor(n1, ni).unsqueeze(-1)  # ... x 1
 
     if n2 is None:
-        mu = n1
-        nt2 = 1 - mu.square() * (1 - ni.square())
+        mu = n1  # ... x 1
+        nt2 = 1 - mu.square() * (1 - ni.square())  # ... x 1
         refractive = torch.sqrt(nt2) * normal + mu * (incident - ni * normal)
         return refractive
     else:
-        n2 = _as_tensor(n2, ni)
+        ni = ni * n1
+        n2 = _as_tensor(n2, ni).unsqueeze(-1)  # ... x 1
         deflection = (torch.sqrt(n2.square() - n1.square() + ni.square()) - ni) * normal
-        return incident + deflection
+        return incident * n1 + deflection
+
+
+def reflect(incident: Ts, normal: Ts) -> Ts:
+    r"""
+    Computes direction of reflective ray given that of incident ray and normal vector:
+
+    .. math::
+        \mathbf{d}_2=\mathbf{d}_1-2(\mathbf{n}\cdot\mathbf{d}_1)\mathbf{n}
+
+    :param Tensor incident: Incident direction :math:`\mathbf{d}_1`. A tensor of shape ``(..., 3)``.
+    :param Tensor normal: Normal vector :math:`\mathbf{n}`. A tensor of shape ``(..., 3)``.
+    :return: Reflective direction :math:`\mathbf{d}_2`. A tensor of shape ``(..., 3)``.
+    :rtype: Tensor
+    """
+    ni = torch.sum(normal * incident, -1, True)  # inner product, ... x 1
+    if ni.lt(0).any():
+        raise exception.PhysicsError('The angle between normal vector and incident ray is not acute.')
+    return incident - 2 * ni * normal

@@ -1,9 +1,9 @@
 import torch
 from torch import nn
 
-from dnois.base.typing import Size2d, Literal, Ts, size2d
-
 from .noise import gaussian
+from .pixel_array import Sensor
+from ..base.typing import Pair, Size2d, Literal, Ts, size2d
 
 __all__ = [
     'cfa_collect',
@@ -215,7 +215,7 @@ def quantize(signal: Ts, levels: int = 256, differentiable: bool = False) -> Ts:
         return qt
 
 
-class SimpleSensor(nn.Module):
+class SimpleSensor(Sensor):
     """
     A simple RGB or grayscale sensor model, which processes the radiance field reaching the sensor
     plane as follows:
@@ -226,6 +226,10 @@ class SimpleSensor(nn.Module):
     #.  Restrict signal values to a given range.
     #.  Quantize signal to a given level.
 
+    :param pixel_num: Numbers of pixels in vertical and horizontal directions.
+    :type pixel_num: int or tuple[int, int]
+    :param pixel_size: Height and width of a pixel in meters.
+    :type pixel_size: float or tuple[float, float]
     :param bool rgb: RGB sensor if ``True``, grayscale sensor otherwise.
         Default: ``True``.
     :param srf: SRF tensor of shape ``(N_C, N_wl)`` where ``N_C`` is 1 or 3,
@@ -248,6 +252,8 @@ class SimpleSensor(nn.Module):
 
     def __init__(
         self,
+        pixel_num: Size2d,
+        pixel_size: Pair[float],
         rgb: bool = True,
         srf: Ts | tuple[Ts, Ts, Ts] = None,
         bayer_pattern: BayerPattern = 'RGGB',
@@ -256,7 +262,7 @@ class SimpleSensor(nn.Module):
         _quantize: int = 256,
         differentiable_quant: bool = True,
     ):
-        super().__init__()
+        super().__init__(pixel_num, pixel_size)
         self.rgb: bool = rgb  #: RGB sensor or not.
         #: Bayer CFA pattern. See :py:func:`rgb2raw`
         self.bayer_pattern: BayerPattern = bayer_pattern

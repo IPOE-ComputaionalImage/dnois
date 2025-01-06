@@ -12,6 +12,7 @@ Mathematics
 
     abs2
     expi
+    polynomial
 
 *********************************
 Functionalities for module

@@ -12,6 +12,7 @@ from ..base.typing import (
     Ts, Size2d, FovSeg, Vector, Callable, Any,
     size2d, vector, cast
 )
+from ..sensor import Sensor
 
 __all__ = [
     'IdealOptics',
@@ -20,8 +21,6 @@ __all__ = [
     'RenderingOptics',
     'StandardOptics',
 ]
-
-_ERMSG_POSITIVE = '{0} must be positive, got {1}'
 
 
 class Optics(nn.Module, metaclass=abc.ABCMeta):
@@ -34,36 +33,25 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
     """
     Base class of :ref:`standard optical system <guide_imodel_standard_optical_system>`.
 
-    :param pixel_num: Numbers of pixels in vertical and horizontal directions.
-    :type pixel_num: int or tuple[int, int]
-    :param pixel_size: Height and width of a pixel in meters.
-    :type pixel_size: float or tuple[float, float]
     :param float image_distance: Focal length of the reference model, i.e. the image distance.
+    :param Sensor sensor: TODO
     """
-    _inherent = ['pixel_num', 'pixel_size', 'image_distance']
+    _inherent = ['image_distance', 'sensor']
 
-    def __init__(
-        self,
-        pixel_num: Size2d,
-        pixel_size: float | tuple[float, float],
-        image_distance: float,
-    ):
+    def __init__(self, image_distance: float, sensor: Sensor = None):
         super().__init__()
-        pixel_num = size2d(pixel_num)
-        if not isinstance(pixel_size, tuple):
-            pixel_size = (pixel_size, pixel_size)
-        if any(n <= 0 for n in pixel_num):
-            raise ValueError(_ERMSG_POSITIVE.format('Number of pixels', pixel_num))
-        if any(s <= 0 for s in pixel_size):
-            raise ValueError(_ERMSG_POSITIVE.format('Pixel size', pixel_size))
-        if image_distance is not None and image_distance <= 0:
-            raise ValueError(_ERMSG_POSITIVE.format('Image distance', image_distance))
-        #: Numbers of pixels in vertical and horizontal directions.
-        self.pixel_num: tuple[int, int] = pixel_num
-        #: Height and width of a pixel.
-        self.pixel_size: tuple[float, float] = pixel_size
+        if image_distance is not None:
+            utils.check.positive(image_distance, 'image_distance')
+        #: Attached :class:`~dnois.sensor.Sensor` object.
+        self.sensor: Sensor | None = sensor
         #: Focal length of the reference model, i.e. the image distance.
         self.image_distance: float | None = image_distance
+
+    def __getattribute__(self, item: str):
+        attr = super().__getattribute__(item)
+        if item == 'sensor' and attr is None:
+            raise RuntimeError(f'Trying to get sensor from a {type(self).__name__} object without sensor')
+        return attr
 
     def tanfovd2obj(self, tanfov: typing.Sequence[tuple[float, float]] | Ts, depth: float | Ts) -> Ts:
         r"""
@@ -90,7 +78,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
             tanfov = self.new_tensor(tanfov)
         if not torch.is_tensor(depth):
             depth = self.new_tensor(depth)
-        typing.check_2d_vector(tanfov, f'tanfov in {self.fovd2obj.__qualname__}')
+        _t.check_2d_vector(tanfov, f'tanfov in {self.fovd2obj.__qualname__}')
 
         tanx, tany, z = torch.broadcast_tensors(-tanfov[..., 0], -tanfov[..., 1], depth)  # ...
         is_inf = z.isinf()
@@ -145,7 +133,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
         :return: Tangent of x and y FoV angles. A tensor of shape ``(..., 2)``.
         :rtype: Tensor
         """
-        typing.check_3d_vector(point, f'point in {self.obj2fov.__qualname__}')
+        _t.check_3d_vector(point, f'point in {self.obj2fov.__qualname__}')
 
         is_inf = point[..., [2]].isinf()  # ... x 1
         point2d = -point[..., :2]
@@ -202,16 +190,7 @@ class StandardOptics(Optics, metaclass=abc.ABCMeta):
 
         :type: :class:`Pinhole`
         """
-        return Pinhole(self.image_distance, self.pixel_num, self.pixel_size)
-
-    @property
-    def sensor_size(self) -> tuple[float, float]:
-        """
-        Returns the physical size i.e. height and width of the sensor.
-
-        :type: tuple[float, float]
-        """
-        return self.pixel_size[0] * self.pixel_num[0], self.pixel_size[1] * self.pixel_num[1]
+        return Pinhole(self.image_distance, self.sensor)
 
 
 def _symmetric_patch(obj_points: Ts, x_symmetric: bool, y_symmetric: bool) -> Ts:
@@ -237,7 +216,17 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
     Base class for optical systems with optical imaging behavior defined.
     See :doc:`/content/guide/optics/imodel` for details.
 
+    If two object points symmetric w.r.t. x-axis (i.e. whose x coordinates are equal
+    and y coordinates are opposite) are expected to produce PSFs symmetric w.r.t. x-axis,
+    one can set ``x_symmetric`` to ``True`` to compute PSFs in one side only,
+    which is more efficient than computing two symmetric PSFs. It is similar
+    for ``y_symmetric``. Specifically, an axisymmetric system allows both as ``True``.
+
     See :class:`StandardOptics` for descriptions about more parameters.
+
+    .. warning::
+
+        TODO
 
     :param wl: Wavelengths for imaging. Default: Fraunhofer *d* line.
         See :func:`~dnois.fraunhofer_line` for details.
@@ -275,35 +264,29 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
     :param cropping: Widths in pixels for cropping after rendering to alleviate
         aliasing (caused by circular convolution) or dimming (caused by linear convolution)
         in edges. Default: 0.
-    :param patch_padding: Padding amount for each patch used for patch-wise (spatially variant) imaging.
-        See :func:`~dnois.optics.space_variant` for more details. Default: ``(0, 0)``.
-    :type patch_padding: int or tuple[int, int]
-    :param bool linear_conv: Whether to compute linear convolution rather than
-        circular convolution when computing blurred image. Default: ``False``.
-    :param str patch_merging: Merging method to use for patch-wise (spatially variant) imaging.
-        See :func:`~dnois.optics.space_variant` for more details. Default: ``'slope'``.
+    :param bool x_symmetric: Whether this system is symmetric w.r.t. x-axis.
+        See descriptions above. Default: ``False``.
+    :param bool y_symmetric: Whether this system is symmetric w.r.t. y-axis.
+        See descriptions above. Default: ``False``.
     """
     _external = [
-        'wl', 'fov_segments', 'depth',
-        'psf_size', 'patch_padding', 'linear_conv', 'patch_merging'
+        'wl', 'fov_segments', 'depth', 'psf_size', 'x_symmetric', 'y_symmetric'
     ]
 
     def __init__(
         self,
-        pixel_num: Size2d,
-        pixel_size: float | tuple[float, float],
         image_distance: float,
+        sensor: Sensor = None,
         *,
         wl: Vector = None,
         fov_segments: FovSeg | Size2d = 'paraxial',
         depth: Vector | tuple[Ts, Ts] = float('inf'),
         psf_size: Size2d = 64,
         cropping: Size2d = 0,
-        patch_padding: Size2d = 0,
-        linear_conv: bool = False,
-        patch_merging: utils.PatchMerging = 'slope',
+        x_symmetric: bool = False,
+        y_symmetric: bool = False,
     ):
-        super().__init__(pixel_num, pixel_size, image_distance)
+        super().__init__(image_distance, sensor)
         if wl is None:
             wl = base.fraunhofer_line('d', 'He')  # self.wl is assumed to never be None
 
@@ -314,13 +297,14 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
 
         self.wl = wl  # property setter
         self.depth = depth  # property setter
-        #: See :class:`RenderingOptics`.
+        #: Number of field-of-view segments when rendering images. See :class:`RenderingOptics`.
         self.fov_segments: FovSeg | tuple[int, int] = cast(FovSeg | tuple[int, int], fov_segments)
-        self.psf_size: tuple[int, int] = size2d(psf_size)  #: See :class:`RenderingOptics`.
+        #: Height and width of PSF (i.e. convolution kernel) used to simulate imaging.
+        #: See :class:`RenderingOptics`.
+        self.psf_size: tuple[int, int] = size2d(psf_size)
         self.cropping: tuple[int, int] = size2d(cropping)  #: See :class:`RenderingOptics`.
-        self.patch_padding: tuple[int, int] = size2d(patch_padding)  #: See :class:`RenderingOptics`.
-        self.linear_conv: bool = linear_conv  #: See :class:`RenderingOptics`.
-        self.patch_merging: utils.PatchMerging = patch_merging  #: See :class:`RenderingOptics`.
+        self.x_symmetric: bool = x_symmetric  #: See :class:`RenderingOptics`.
+        self.y_symmetric: bool = y_symmetric  #: See :class:`RenderingOptics`.
 
     def __setattr__(self, name, value):
         normalizer = getattr(self, '_normalize_' + name, None)
@@ -414,27 +398,21 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         wl: Vector = None,
         depth: Vector | tuple[Ts, Ts] = None,
         psf_size: Size2d = None,
-        x_symmetric: bool = False,
-        y_symmetric: bool = False,
+        x_symmetric: bool = None,
+        y_symmetric: bool = None,
         **kwargs,
     ) -> Ts:
         r"""
         Renders :ref:`imaged radiance field <guide_overview_irf>` in a point-wise manner,
         i.e. PSFs of all the pixels are computed and superposed.
 
-        If two object points symmetric w.r.t. x-axis (i.e. whose x coordinates are equal
-        and y coordinates are opposite) are expected to produce PSFs symmetric w.r.t. x-axis,
-        one can set ``x_symmetric`` to ``True`` to compute PSFs in one side only,
-        which is more efficient than computing two symmetric PSFs. It is similar
-        for ``y_symmetric``. Specifically, an axisymmetric system allows both as ``True``.
-
         :param scene: The scene to be imaged.
         :type scene: :class:`~dnois.scene.Scene`
         :param wl: See :class:`RenderingOptics`. Default: :attr:`.wl`.
         :param depth: See :class:`RenderingOptics`. Default: :attr:`.depth`.
         :param psf_size: See :class:`RenderingOptics`. Default: :attr:`.psf_size`.
-        :param bool x_symmetric: See descriptions above. Default: ``False``.
-        :param bool y_symmetric: See descriptions above. Default: ``False``.
+        :param bool x_symmetric: See :class:`RenderingOptics`. Default: :attr:`.x_symmetric`.
+        :param bool y_symmetric: See :class:`RenderingOptics`. Default: :attr:`.y_symmetric`.
         :param kwargs: Additional keyword arguments passed to :meth:`.psf`.
         :return: Computed :ref:`imaged radiance field <guide_overview_irf>`.
             A tensor of shape :math:`(B, N_\lambda, H, W)`.
@@ -443,6 +421,8 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         wl = self.pick('wl', wl)
         depth = self.pick('depth', depth)
         psf_size = self.pick('psf_size', psf_size)
+        x_symmetric = self.pick('x_symmetric', x_symmetric)
+        y_symmetric = self.pick('y_symmetric', y_symmetric)
 
         self._check_scene(scene)
         scene: _sc.ImageScene
@@ -453,10 +433,12 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         _, _, n_h, n_w = scene.image.shape
         depth_map = self._make_depth_map(scene, depth)  # B|1 x H x W
         obj_points = self.points_grid((n_h, n_w), depth_map, True)  # B|1 x H x W x 3
-        obj_points = _symmetric_patch(obj_points, x_symmetric, y_symmetric)
+        if not scene.depth_aware:
+            obj_points = _symmetric_patch(obj_points, x_symmetric, y_symmetric)
 
         psf = self.psf(obj_points, psf_size, wl, **kwargs)  # B|1 x H x W x N_wl x H_P x W_P
-        psf = _stitch_symmetric(psf, n_h, n_w, x_symmetric, y_symmetric)
+        if not scene.depth_aware:
+            psf = _stitch_symmetric(psf, n_h, n_w, x_symmetric, y_symmetric)
         psf = psf.permute(0, 3, 1, 2, 4, 5)  # B|1 x N_wl x H x W x H_P x W_P
 
         image = formation.superpose(scene.image, psf)  # B x N_wl x H x W
@@ -467,15 +449,15 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
     def patchwise_render(
         self,
         scene: _sc.Scene,
+        pad: Size2d = 0,
+        linear_conv: bool = True,
+        merging: utils.PatchMerging = 'slope',
         segments: Size2d = None,
         wl: Vector = None,
         depth: Vector | tuple[Ts, Ts] = None,
         psf_size: Size2d = None,
-        pad: Size2d = None,
-        linear_conv: bool = None,
-        merging: utils.PatchMerging = None,
-        x_symmetric: bool = False,
-        y_symmetric: bool = False,
+        x_symmetric: bool = None,
+        y_symmetric: bool = None,
         **kwargs
     ) -> Ts:
         r"""
@@ -484,23 +466,21 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         patches and PSF is assumed to be space-invariant in each patch, but varies
         from patch to patch.
 
-        If two object points symmetric w.r.t. x-axis (i.e. whose x coordinates are equal
-        and y coordinates are opposite) are expected to produce PSFs symmetric w.r.t. x-axis,
-        one can set ``x_symmetric`` to ``True`` to compute PSFs in one side only,
-        which is more efficient than computing two symmetric PSFs. It is similar
-        for ``y_symmetric``. Specifically, an axisymmetric system allows both as ``True``.
-
         :param scene: The scene to be imaged.
         :type scene: :class:`~dnois.scene.Scene`
+        :param pad: Padding amount for each patch. See :func:`~dnois.optics.space_variant`
+            for more details. Default: ``(0, 0)``.
+        :type pad: int or tuple[int, int]
+        :param bool linear_conv: Whether to compute linear convolution rather than
+            circular convolution when computing blurred image. Default: ``True``.
+        :param str merging: Merging method to use for patch-wise (spatially variant) imaging.
+            See :func:`~dnois.optics.space_variant` for more details. Default: ``'slope'``.
         :param segments: See :class:`RenderingOptics`. Default: :attr:`.fov_segments`.
         :param wl: See :class:`RenderingOptics`. Default: :attr:`.wl`.
         :param depth: See :class:`RenderingOptics`. Default: :attr:`.depth`.
         :param psf_size: See :class:`RenderingOptics`. Default: :attr:`.psf_size`.
-        :param pad: See :class:`RenderingOptics`. Default: :attr:`.patch_padding`.
-        :param linear_conv: See :class:`RenderingOptics`. Default: :attr:`.linear_conv`.
-        :param merging: See :class:`RenderingOptics`. Default: :attr:`.patch_merging`.
-        :param bool x_symmetric: See descriptions above. Default: ``False``.
-        :param bool y_symmetric: See descriptions above. Default: ``False``.
+        :param bool x_symmetric: See :class:`RenderingOptics`. Default: :attr:`.x_symmetric`.
+        :param bool y_symmetric: See :class:`RenderingOptics`. Default: :attr:`.y_symmetric`.
         :param kwargs: Additional keyword arguments passed to :meth:`.psf`.
         :return: Computed :ref:`imaged radiance field <guide_overview_irf>`.
             A tensor of shape :math:`(B, N_\lambda, H, W)`.
@@ -509,10 +489,11 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         segments = self.pick('fov_segments', segments)
         wl = self.pick('wl', wl)
         depth = self.pick('depth', depth)
-        pad = self.pick('patch_padding', pad)
-        linear_conv = self.pick('linear_conv', linear_conv)
-        merging = self.pick('patch_merging', merging)
         psf_size = self.pick('psf_size', psf_size)
+        x_symmetric = self.pick('x_symmetric', x_symmetric)
+        y_symmetric = self.pick('y_symmetric', y_symmetric)
+
+        pad = size2d(pad)
 
         self._check_scene(scene)
         scene: _sc.ImageScene
@@ -749,8 +730,9 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
     def depth(self) -> Ts | tuple[Ts, Ts]:
         """
         Depth values used when a scene has no depth information.
+        A 0D Tensor, 1D Tensor or a pair of 0D Tensor. See :class:`RenderingOptics`.
 
-        :type: 0D Tensor or 1D Tensor or a pair of 0D Tensor
+        :type: Tensor or tuple[Tensor, Tensor]
         """
         d = self._b_depth
         return (self._b_depth_min, self._b_depth_max) if d is None else d
@@ -764,23 +746,12 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
 
     @property
     def wl(self) -> Ts:
-        """Wavelength for rendering.\n\n:type: 1D Tensor"""
+        """Wavelength for rendering. A 1D tensor.\n\n:type: Tensor"""
         return self._b_wl
 
     @wl.setter
     def wl(self, value: Ts):  # already normalized in __setattr__
         self._b_wl = value
-
-    @classmethod
-    def from_dict(cls, d: dict):
-        d = d.copy()
-        depth = d['depth']
-        if isinstance(depth, dict):
-            d['depth'] = (torch.tensor(depth['min']), torch.tensor(depth['max']))
-        return super().from_dict(d)
-
-    def _delegate(self) -> Ts:
-        return self._b_wl
 
     def _check_scene(self, scene: _sc.Scene):
         if not isinstance(scene, _sc.ImageScene):
@@ -820,7 +791,6 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         return fov_segments
 
     _normalize_psf_size = staticmethod(size2d)
-    _normalize_patch_padding = staticmethod(size2d)
 
     def _todict_depth(self, keep_tensor: bool = True):
         depth = self.depth
@@ -830,12 +800,28 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
             return depth.tolist()
         return {'min': depth[0].tolist(), 'max': depth[1].tolist()}
 
+    def _todict_sensor(self, _: bool = True):
+        return None if self.sensor is None else {
+            'pixel_size': self.sensor.pixel_size,
+            'pixel_num': self.sensor.pixel_num,
+        }
+
+    @classmethod
+    def _pre_from_dict(cls, d: dict):
+        d = super()._pre_from_dict(d)
+        depth = d['depth']
+        if isinstance(depth, dict):
+            d['depth'] = (torch.tensor(depth['min']), torch.tensor(depth['max']))
+        if d['sensor'] is not None:
+            d['sensor'] = Sensor(**d['sensor'])
+        return d
+
 
 class IdealOptics(RenderingOptics):
     """
     Ideal optics model.
 
-    See :class:`RenderingOptics` for descriptions of more arguments.
+    See :class:`RenderingOptics` for descriptions of more parameters.
 
     :param float pupil_diameter: Diameter of the light-passing pupil on principal planes.
     :param float fl1: Focal length in object space.
@@ -846,19 +832,18 @@ class IdealOptics(RenderingOptics):
 
     def __init__(
         self,
-        pixel_num: Size2d,
-        pixel_size: float | tuple[float, float],
         image_distance: float,
         pupil_diameter: float,
         fl1: float,
         fl2: float = None,
+        sensor: Sensor = None,
         **kwargs,
     ):
         if fl2 is None:
             fl2 = fl1
 
-        super().__init__(pixel_num, pixel_size, image_distance, **kwargs)
-        self.pupil_diameter: float = pupil_diameter  #:Diameter of the light-passing pupil on principal planes.
+        super().__init__(image_distance, sensor, **kwargs)
+        self.pupil_diameter: float = pupil_diameter  #: Diameter of the light-passing pupil on principal planes.
         self.fl1: float = fl1  #: Focal length in object space.
         self.fl2: float = fl2  #: Focal length in image space.
 
@@ -875,7 +860,7 @@ class IdealOptics(RenderingOptics):
         radius = coc[..., None, None] / 2  # ... x 1 x 1
 
         psf = torch.zeros(*coc.shape, *size, device=origins.device, dtype=origins.dtype)  # ... x H x W
-        y, x = utils.grid(size, self.pixel_size, device=origins.device, dtype=origins.dtype)
+        y, x = utils.grid(size, self.sensor.pixel_size, device=origins.device, dtype=origins.dtype)
         r2 = x.square() + y.square()  # H x W
         psf[r2 <= radius.square()] = 1
         psf = _func.norm_psf(psf)
@@ -896,19 +881,20 @@ class IdealOptics(RenderingOptics):
 
     @property
     def sensor_distance(self) -> float:
-        return self.image_distance * self.fl2 / self.fl1
+        """
+        Distance between image principal plane and image plane (sensor plane).
+
+        :rtype:
+        """
+        if self.fl1 == self.fl2:
+            return self.image_distance
+        else:
+            return self.image_distance * self.fl2 / self.fl1
 
 
 class Pinhole(StandardOptics):
-    def __init__(
-        self,
-        focal_length: float,
-        pixel_num: Size2d,
-        pixel_size: float | tuple[float, float],
-    ):
-        super().__init__(pixel_num, pixel_size, focal_length)
-        if focal_length <= 0:
-            raise ValueError(_ERMSG_POSITIVE.format('Focal length', focal_length))
+    def __init__(self, focal_length: float, sensor: Sensor):
+        super().__init__(focal_length, sensor)
 
     def forward(self, scene: _sc.Scene) -> Ts:
         if not isinstance(scene, _sc.ImageScene):
@@ -916,9 +902,10 @@ class Pinhole(StandardOptics):
         if (si := scene.intrinsic) is not None:
             if not torch.allclose(si, self.intrinsic().broadcast_to(si.size(0), -1, -1)):
                 raise NotImplementedError()
-        if (scene.height, scene.width) != self.pixel_num:
+        pn = self.sensor.pixel_num
+        if (scene.height, scene.width) != pn:
             raise RuntimeError(f'Got {_sc.ImageScene.__name__} with shape {scene.height}x{scene.width}, '
-                               f'but size of sensor is {self.pixel_num[0]}x{self.pixel_num[1]}')
+                               f'but size of sensor is {pn[0]}x{pn[1]}')
         return scene.image
 
     def intrinsic(self, **kwargs) -> Ts:
@@ -932,11 +919,11 @@ class Pinhole(StandardOptics):
         """
         kwargs.setdefault('dtype', torch.float32)
         i = torch.zeros(3, 3, **kwargs)
-        i[0, 0] = self.focal_length / self.pixel_size[1]
-        i[1, 1] = self.focal_length / self.pixel_size[0]
+        i[0, 0] = self.focal_length / self.sensor.pixel_size[1]
+        i[1, 1] = self.focal_length / self.sensor.pixel_size[0]
         i[2, 2] = 1
-        i[0, 2] = self.pixel_num[1] / 2 * self.pixel_size[1]
-        i[1, 2] = self.pixel_num[0] / 2 * self.pixel_size[0]
+        i[0, 2] = self.sensor.w / 2
+        i[1, 2] = self.sensor.h / 2
         return i
 
     @property
@@ -949,20 +936,17 @@ class Pinhole(StandardOptics):
 
     @property
     def fov_half(self) -> float:
-        half_h = self.pixel_size[0] * (self.pixel_num[0] - 1) / 2
-        half_w = self.pixel_size[1] * (self.pixel_num[1] - 1) / 2
+        half_h, half_w = self.sensor.h / 2, self.sensor.w / 2
         tan = math.sqrt(half_h * half_h + half_w * half_w) / self.focal_length
         return math.atan(tan)
 
     @property
     def fov_half_x(self) -> float:
-        half_w = self.pixel_size[1] * (self.pixel_num[1] - 1) / 2
-        return math.atan(half_w / self.focal_length)
+        return math.atan(self.sensor.w / (2 * self.focal_length))
 
     @property
     def fov_half_y(self) -> float:
-        half_h = self.pixel_size[0] * (self.pixel_num[0] - 1) / 2
-        return math.atan(half_h / self.focal_length)
+        return math.atan(self.sensor.h / (2 * self.focal_length))
 
     @property
     def reference(self) -> 'Pinhole':

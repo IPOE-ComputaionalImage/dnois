@@ -15,7 +15,7 @@ def _reshape(x: Ts, n: int, idx: int) -> Ts:
 
 
 def interval(
-    n: int, spacing: float | Ts = None, shift: float | Ts = None, symmetric: bool = False, **kwargs
+    n: int, spacing: float | Ts = None, center: float | Ts = None, symmetric: bool = False, **kwargs
 ) -> Ts:
     """
     Create a 1D evenly spaced grid.
@@ -36,7 +36,7 @@ def interval(
                 [-0.20, 0.00, 0.20]])
         >>> interval(3, torch.tensor([0.1, 0.2]), torch.tensor([-1, 1]))
         tensor([[-1.10, -1.00, -0.90],
-                [-0.80, 1.00, 1.20]])
+                [ 0.80,  1.00,  1.20]])
         >>> interval(4)
         tensor([-2., -1., 0., 1.])
         >>> interval(4, symmetric=True)
@@ -46,15 +46,15 @@ def interval(
     :param spacing: Spacing between grid points. If a tensor with shape ``(...)``,
         the returned tensor will have shape ``(..., n)``. Default: 1.
     :type spacing: float or Tensor.
-    :param shift: Shift amount to add to spaced points. If a tensor with shape ``(...)``,
+    :param center: Center of resulted grid points. If a tensor with shape ``(...)``,
         the returned tensor will have shape ``(..., n)``. Default: 0.
-    :type shift: float or Tensor.
-    :param bool symmetric: If ``True``, grid points are symmetric w.r.t. ``shift``.
+    :type center: float or Tensor.
+    :param bool symmetric: If ``True``, grid points are symmetric w.r.t. ``center``.
         Otherwise, ``n // 2`` points are smaller, ``n // 2 - 1`` points are larger
-        and one point is ``shift`` value. Only matters when ``n`` is even. Default: ``False``.
+        and one point is ``center`` value. Only matters when ``n`` is even. Default: ``False``.
     :keyword kwargs: Tensor creation arguments passes to :py:func:`torch.linspace` like ``device``.
-    :return: A tensor of shape ``(n,)`` if ``spacing`` and ``shift`` are both scalars,
-        otherwise of shape ``(*<broadcast shape of spacing and shift>, n)``.
+    :return: A tensor of shape ``(n,)`` if ``spacing`` and ``center`` are both scalars,
+        otherwise of shape ``(*<broadcast shape of spacing and center>, n)``.
     :rtype: Tensor
     """
     if n % 2 == 1 or symmetric:
@@ -66,18 +66,18 @@ def interval(
             x = x * spacing
         else:  # >1D tensor
             x = x * spacing.unsqueeze(-1)
-    if shift is not None:
-        if is_scalar(shift):
-            x = x + shift
+    if center is not None:
+        if is_scalar(center):
+            x = x + center
         else:
-            x = x + shift.unsqueeze(-1)
+            x = x + center.unsqueeze(-1)
     return x
 
 
 def grid(
     n: Sequence[int],
     spacing: float | Ts | Sequence[float | Ts] = None,
-    shift: float | Ts | Sequence[float | Ts] = None,
+    center: float | Ts | Sequence[float | Ts] = None,
     symmetric: bool = False,
     broadcast: bool = True,
     **kwargs
@@ -112,12 +112,12 @@ def grid(
         >>> grid((2, 3), torch.tensor([0.1, 0.2]), torch.tensor([1., 2.]))
         [tensor([[[0.90, 0.90, 0.90],
                   [1.00, 1.00, 1.00]],
-
+        <BLANKLINE>
                  [[1.80, 1.80, 1.80],
                   [2.00, 2.00, 2.00]]]),
          tensor([[[0.90, 1.00, 1.10],
                   [0.90, 1.00, 1.10]],
-
+        <BLANKLINE>
                  [[1.80, 2.00, 2.20],
                   [1.80, 2.00, 2.20]]])]
         >>> grid((2, 3), symmetric=True)
@@ -134,14 +134,14 @@ def grid(
     :param spacing: Spacing between grid points in each dimension.
         A single ``float`` or 0D tensor indicates the spacing for all dimensions. Default: 1.
     :type spacing: float or Tensor or Sequence[float | Tensor]
-    :param shift: Shift amount to add to spaced points in each dimension.
-        A single ``float`` or 0D tensor indicates the shift for all dimensions. Default: 0.
-    :type shift: float or Tensor or Sequence[float | Tensor]
+    :param center: Center of resulted grid points in each dimension.
+        A single ``float`` or 0D tensor indicates the center for all dimensions. Default: 0.
+    :type center: float or Tensor or Sequence[float | Tensor]
     :param bool symmetric: See :py:func:`interval`. Default: ``False``.
     :param bool broadcast: Whether to broadcast resulted tensors. Default: ``True``.
     :param kwargs: Tensor creation arguments passes to :py:func:`torch.linspace`.
-    :return: A list of ``len(n)``-D tensors if ``spacing`` and ``shift`` are both scalars,
-        otherwise of shape ``(*<broadcast shape of spacing and shift>, *n)``.
+    :return: A list of ``len(n)``-D tensors if ``spacing`` and ``center`` are both scalars,
+        otherwise of shape ``(*<broadcast shape of spacing and center>, *n)``.
         See above examples.
     :rtype: list[Tensor]
     """
@@ -150,13 +150,13 @@ def grid(
         spacing = [spacing for _ in range(dims)]
     elif len(spacing) != dims:
         raise ValueError(f'Given dims={dims} but number of grid spacings is {len(spacing)}')
-    if not isinstance(shift, Sequence):
-        shift = [shift for _ in range(dims)]
-    elif len(shift) != dims:
-        raise ValueError(f'Given dims={dims} but number of offsets is {len(shift)}')
+    if not isinstance(center, Sequence):
+        center = [center for _ in range(dims)]
+    elif len(center) != dims:
+        raise ValueError(f'Given dims={dims} but number of offsets is {len(center)}')
 
     g = [
-        _reshape(interval(n[i], spacing[i], shift[i], symmetric, **kwargs), dims, i)
+        _reshape(interval(n[i], spacing[i], center[i], symmetric, **kwargs), dims, i)
         for i in range(dims)
     ]
     if broadcast:

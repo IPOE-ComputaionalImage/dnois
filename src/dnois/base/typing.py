@@ -28,6 +28,7 @@ __all__ = [
     'ConvOut',
     'FovSeg',
     'Numeric',
+    'Pair',
     'PsfCenter',
     'RGBFormat',
     'Scalar',
@@ -55,7 +56,8 @@ Scalar = Union[float, Ts]  # can be converted to 0d tensor
 Vector = Union[float, Sequence[float], Ts]  # can be converted to 1d tensor
 SclOrVec = Union[float, Sequence[float], Ts]  # Scalar or Vector
 
-Size2d = Union[int, tuple[int, int]]
+Pair = Union[_T, tuple[_T, _T]]
+Size2d = Pair[int]
 Sizend = Union[int, Sequence[int]]
 
 # options
@@ -65,16 +67,24 @@ RGBFormat = Literal['floats', 'ints', 'hex']
 PsfCenter = Literal['linear', 'mean', 'chief']
 
 
-def size2d(size: Size2d) -> tuple[int, int]:
-    if isinstance(size, int):
-        return size, size
-    elif isinstance(size, tuple):
-        if not isinstance(size[0], int) or not isinstance(size[1], int):
-            raise ValueError(f'A pair of int expected, got {size}')
+def pair[T](arg: Pair[T], type_: type[T] = None) -> tuple[T, T]:
+    if type_ is None:
+        return arg if isinstance(arg, tuple) else (arg, arg)
+
+    cn = type_.__name__
+    if isinstance(arg, type_):
+        return arg, arg
+    elif isinstance(arg, tuple):
+        if not isinstance(arg[0], type_) or not isinstance(arg[1], type_):
+            raise ValueError(f'A pair of {cn} expected, got {arg}')
         # allow negative
-        return cast(tuple[int, int], size)
+        return cast(tuple[type_, type_], arg)
     else:
-        raise ValueError(f'An int or a pair of int expected, got {type(size)}')
+        raise ValueError(f'An {cn} or a pair of {cn} expected, got {type(arg)}')
+
+
+def size2d(size: Size2d) -> tuple[int, int]:
+    return pair(size, int)
 
 
 def sizend(size: Sizend, ndim: int = None) -> list[int]:
@@ -146,17 +156,3 @@ def scl_or_vec(arg: SclOrVec, dtype: _dty = None, device: Device = None, **kwarg
         return arg.to(**cfg, **kwargs)
     else:
         raise TypeError(f'A float, a sequence of float or a 0d or 1d tensor expected, got {type(arg)}')
-
-
-def pair(arg: Union[_T, tuple[_T, _T]]) -> tuple[_T, _T]:
-    return arg if isinstance(arg, tuple) else (arg, arg)
-
-
-def check_3d_vector(ts: Ts, name: str = 'a 3d vector'):
-    if ts.ndim < 1 or ts.size(-1) != 3:
-        raise ShapeError(f'Size of last dimension of {name} must be 3, got shape {ts.shape}')
-
-
-def check_2d_vector(ts: Ts, name: str = 'a 2d vector'):
-    if ts.ndim < 1 or ts.size(-1) != 2:
-        raise ShapeError(f'Size of last dimension of {name} must be 2, got shape {ts.shape}')

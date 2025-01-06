@@ -42,7 +42,7 @@ Specific surface types
     EvenAspherical
     Fresnel
     Planar
-    PlanarPhase
+    PolynomialPhase
     Spherical
     Standard
     Stop
@@ -53,7 +53,7 @@ Ray-tracing-based optical systems
 .. autosummary::
     :toctree: ../../generated/optics/rt/sys
 
-    SequentialRayTracing
+    CoaxialRayTracing
 
 .. _configuration_for_newtons_method:
 

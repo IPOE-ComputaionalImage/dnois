@@ -1271,9 +1271,6 @@ class Diffraction(_t.TensorContainerMixIn, nn.Module, metaclass=abc.ABCMeta):
 
         self._ready = True
 
-    def _delegate(self) -> Ts:
-        return self.wl
-
     def _set_spacing(self, key, value):
         if is_scalar(value):
             value = scalar(value)

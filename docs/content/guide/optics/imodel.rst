@@ -1,15 +1,19 @@
 ################################
 DNOIS Imaging Model
 ################################
-TODO
+This chapter describes the imaging model of DNOIS.
 
-This document should be included in user guide.
+**********************************
+Pinhole Camera
+**********************************
+The most cameras can be modeled as pinhole cameras. A pinhole camera is specified
+by a optical center :math:`O` and a focal plane :math:`S`. When an object point
+emits a bundle of rays, only the one passing :math:`O` can be seen by the camera. ...
 
 .. _guide_imodel_cameras_coordinate_system:
 
-********************************
 Camera's coordinate system
-********************************
+======================================
 TODO
 
 .. _guide_imodel_ccs_inf:

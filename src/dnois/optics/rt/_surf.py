@@ -6,11 +6,8 @@ from torch import nn
 
 from .ray import BatchedRay
 from ... import mt, utils, torch as _t, base
-from ...base.typing import (
-    Sequence, Ts, Any, Callable, Scalar, Self, Size2d,
-    scalar, size2d, cast
-)
-from ...torch import EnhancedModule
+from ...base import typing
+from ...base.typing import Sequence, Ts, Any, Callable, Scalar, Self, Size2d
 
 __all__ = [
     'NT_EPSILON',
@@ -48,30 +45,138 @@ def _dist_transform(x: Ts, curve: Callable[[Ts], Ts]) -> Ts:
     return magnitude.copysign(x)
 
 
-class Context:
+def _rotation_mat(angles: Ts) -> Ts:
+    c, s = angles.cos(), angles.sin()
+    return torch.stack([
+        torch.stack([c.prod() - s[2] * s[0], c[2] * c[1] * s[0] + s[2] * c[0], -c[2] * s[1]]),
+        torch.stack([-s[2] * c[1] * c[0] - c[2] * s[0], -s[2] * c[1] * s[0] + c[2] * c[0], s[2] * s[1]]),
+        torch.stack([s[1] * c[0], s[1] * s[0], c[1]]),
+    ])
+
+
+class Context(_t.EnhancedModule):
     """
-    A class representing the context of a :py:class:`~Surface` in a lens group. As component of the
-    lens group, a surface does not hold the reference to the group but can access
+    A class representing the context of a :py:class:`~Surface` in a list of surfaces. As component of the
+    surface list, a surface does not hold the reference to the list but can access
     the information that depends on other surfaces in it via this class.
-    Every surface contained in a lens group has a related context object.
+    Every surface contained in a surface list has a related context object.
     If it is not contained in any group, its context attribute is ``None``.
 
-    :param Surface surface: The host surface that this context belongs to.
-    :param SurfaceList lens_group: The lens group containing the surface.
-    """
+    This class also implements the conversion between global and surface-local coordinates.
+    See :ref:`guide_optics_rt_slcs` for more details.
 
-    def __init__(self, surface: 'Surface', lens_group: 'SurfaceList'):
+    :param Surface surface: The host surface that this context belongs to.
+    :param SurfaceList surface_list: The surface list containing ``surface``.
+    """
+    x: Ts  #: x-coordinate of the origin of local coordinate.
+    y: Ts  #: y-coordinate of the origin of local coordinate.
+    z: Ts  #: z-coordinate of the origin of local coordinate.
+    theta: Ts  #: Polar angle of z-axis of local coordinate.
+    phi: Ts  #: Azimuthal angle of z-axis of local coordinate.
+    chi: Ts  #: Spin angle of local coordinate.
+
+    _transform_params = {'x', 'y', 'z', 'theta', 'phi', 'chi'}
+    _writable_params = _t.EnhancedModule._writable_params | _transform_params
+
+    def __init__(self, surface: 'Surface', surface_list: 'SurfaceList'):
+        super().__init__()
         self.surface: 'Surface' = surface  #: The host surface that this context belongs to.
-        self.lens_group: 'SurfaceList' = lens_group  #: The lens group containing the surface.
+        self.surface_list: 'SurfaceList' = surface_list  #: The surface list containing the surface.
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            pass
+        if name in self._transform_params:
+            return self.new_tensor(0)  # default value for coordinate system parameters
+        raise AttributeError(name)
+
+    def __setattr__(self, key, value):
+        if key in {'surface', 'surface_list'}:
+            self.__dict__[key] = value  # avoid these two are registered as submodule
+        else:
+            return super().__setattr__(key, value)
+
+    def g2l(self, x: Ts, direction: bool = False) -> Ts:
+        r"""
+        Converts global vectors ``x`` to local ones.
+        If ``x`` represents positions, it is
+
+        .. math::
+            \mathbf{x}'=\mathbf{R}(\mathbf{x}-\mathbf{x}_0)
+
+        where :math:`\mathbf{R}` is rotation matrix and :math:`\mathbf{x}_0` is :attr:`.origin`.
+        If ``x`` represents directions, instead, it is
+
+        .. math::
+            \mathbf{x}'=\mathbf{R}\mathbf{x}
+
+        :param Tensor x: Global vectors, a tensor of shape ``(..., 3)``.
+        :param bool direction: Whether ``x`` represents directions. Default: ``False``.
+        :return: Local vectors, a tensor of shape ``(..., 3)``.
+        :rtype: Tensor
+        """
+        if self.shifted and not direction:
+            x = x - self.origin
+        if self.rotated:
+            x = _rotation_mat(torch.stack([self.theta, self.phi, self.chi])) @ x.unsqueeze(-1)
+        return x
+
+    def l2g(self, x: Ts, direction: bool = False) -> Ts:
+        r"""
+        Converts local vectors ``x`` to global ones.
+        If ``x`` represents positions, it is
+
+        .. math::
+            \mathbf{x}'=\mathbf{R}^{-1}\mathbf{x}+\mathbf{x}_0
+
+        where :math:`\mathbf{R}` is rotation matrix and :math:`\mathbf{x}_0` is :attr:`.origin`.
+        If ``x`` represents directions, instead, it is
+
+        .. math::
+            \mathbf{x}'=\mathbf{R}^{-1}\mathbf{x}
+
+        :param Tensor x: Local vectors, a tensor of shape ``(..., 3)``.
+        :param bool direction: Whether ``x`` represents directions. Default: ``False``.
+        :return: Global vectors, a tensor of shape ``(..., 3)``.
+        :rtype: Tensor
+        """
+        if self.rotated:
+            x = _rotation_mat(-torch.stack([self.chi, self.phi, self.theta])).T @ x.unsqueeze(-1)
+        if self.shifted and not direction:
+            x = x + self.origin
+        return x
+
+    def g2l_ray(self, ray: BatchedRay) -> BatchedRay:
+        ray = ray.clone()
+        ray.o = self.g2l(ray.o, False)
+        ray.d = self.g2l(ray.d, True)
+        return ray
+
+    def l2g_ray(self, ray: BatchedRay) -> BatchedRay:
+        ray = ray.clone()
+        ray.o = self.l2g(ray.o, False)
+        ray.d = self.l2g(ray.d, True)
+        return ray
+
+    def to_dict(self, keep_tensor: bool = True) -> dict[str, Any]:
+        d = {}
+        if '_parameters' in self.__dict__:
+            params = self.__dict__['_parameters']
+            for name in self._transform_params:
+                if name in params:
+                    d[name] = self._attr2dictitem(name, keep_tensor)
+        return d
 
     @property
     def index(self) -> int:
         """
-        The index of the host surface in the lens group.
+        The index of the host surface in the surface list.
 
         :type: int
         """
-        return self.lens_group.index(self.surface)
+        return self.surface_list.index(self.surface)
 
     @property
     def material_before(self) -> mt.Material:
@@ -82,11 +187,144 @@ class Context:
         """
         idx = self.index
         if idx == 0:
-            return self.lens_group.mt_head
-        return self.lens_group[idx - 1].material
+            return self.surface_list.mt_head
+        return self.surface_list[idx - 1].material
 
     @property
-    def z(self) -> Ts:
+    def shifted(self) -> bool:
+        """
+        Whether the local coordinate system is shifted.
+
+        :type: bool
+        """
+        if '_parameters' in self.__dict__:
+            params = self.__dict__['_parameters']
+            return any(n in params for n in 'xyz')
+        return False
+
+    @property
+    def rotated(self) -> bool:
+        """
+        Whether the local coordinate system is rotated.
+
+        :type: bool
+        """
+        if '_parameters' in self.__dict__:
+            params = self.__dict__['_parameters']
+            return any(n in params for n in ['theta', 'phi', 'chi'])
+        return False
+
+    @property
+    def axis(self) -> Ts:
+        r"""
+        A unit vector of shape ``(3,)`` indicating rotated z axis in global coordinate system:
+
+        .. math::
+            \mathbf{A}=\left(\sin\theta\cos\phi, \sin\theta\sin\phi, \cos\theta\right)
+
+        If assigning a tensor to it, it will be normalized to unit length automatically.
+
+        :type: Tensor
+        """
+        s = self.theta.sin()
+        return torch.stack([s * self.phi.cos(), s * self.phi.sin(), self.theta.cos()])
+
+    @axis.setter
+    def axis(self, value: Ts):
+        _t.check_3d_vector(value, 'axis')
+        if value.ndim != 1:
+            raise base.ShapeError(f'axis must be a 1D vector, got shape {value.shape}')
+
+        value: Ts = value / torch.linalg.vector_norm(value)
+        theta = value[2].acos()
+        phi = torch.atan2(value[1], value[0])
+        self.theta = theta
+        self.phi = phi
+
+    @property
+    def origin(self) -> Ts:
+        r"""
+        Coordinate of the origin of local coordinate system in the global one.
+        A tensor of shape ``(3,)``. This property can be deleted to fix local origin
+        to global origin.
+
+        :type: Tensor
+        """
+        return torch.stack([self.x, self.y, self.z])
+
+    @origin.setter
+    def origin(self, value: Ts):
+        _t.check_3d_vector(value, 'origin')
+        if value.ndim != 1:
+            raise base.ShapeError(f'origin must be a 1D vector, got shape {value.shape}')
+        for i, n in enumerate('xyz'):
+            setattr(self, n, value[i])
+
+    @origin.deleter
+    def origin(self):
+        for n in 'xyz':
+            delattr(self, n)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'Context':
+        raise TypeError(f'{cls.__name__} cannot be instantiated from a dict by calling {cls.from_dict.__qualname__}')
+
+    def _check_available(self):
+        if self.surface in self.surface_list:
+            return
+        raise RuntimeError(
+            'The surface is not contained in the surface list referenced by its context object. '
+            'This may be because the surface has been removed from the surface list.')
+
+
+class CoaxialContext(Context):
+    """
+    A subclass of :class:`Context` for coaxial systems. In coaxial systems, default origins
+    of local coordinate systems are arranged on z-axis and are determined by the distance
+    from each surface to the next one. These points are called *baseline* s.
+    Baseline of the first surface is fixed to 0. Shift and rotation of local coordinate systems
+    can also be specified in order to, for example, simulate fabrication errors.
+
+    Note that the ``origin`` of this class is defined relative to baseline. In other words,
+    ``origin`` is ``(0, 0, 0)`` means the global coordinate of origin is ``(0, 0, baseline)``.
+
+    See :class:`Context` for descriptions of more parameters.
+
+    :param distance: Distance between baselines of the host surface and the next one.
+    :type distance: float | Tensor
+    """
+    distance: nn.Parameter  #: Distance between baselines of the host surface and the next one.
+    _writable_params = Context._writable_params | {'distance'}
+
+    def __init__(
+        self,
+        surface: 'Surface',
+        surface_list: 'SurfaceList',
+        distance: typing.Scalar = None,
+    ):
+        super().__init__(surface, surface_list)
+        self.register_parameter('distance', nn.Parameter(distance))
+
+    def g2l(self, x: Ts, direction: bool = False) -> Ts:
+        if not direction:
+            x = x.clone()
+            x[..., 2] -= self.baseline
+        return super().g2l(x, direction)
+
+    def l2g(self, x: Ts, direction: bool = False) -> Ts:
+        x = super().l2g(x, direction)
+        if not direction:
+            x = x.clone()
+            x[..., 2] += self.baseline
+        return x
+
+    def to_dict(self, keep_tensor: bool = True) -> dict[str, Any]:
+        d = super().to_dict(keep_tensor)
+        d['distance'] = self._attr2dictitem('distance', keep_tensor)
+        return d
+
+    @property
+    def baseline(self) -> Ts:
         """
         The z-coordinate of the related surface's baseline. A 0D tensor.
 
@@ -94,21 +332,14 @@ class Context:
         """
         idx = self.index
         if idx == 0:
-            return self.surface.distance.new_tensor(0.)
-        z = self.lens_group[0].distance
-        for s in self.lens_group[1:idx]:
-            z = z + s.distance
+            return self.new_tensor(0.)
+        z = self.surface_list[0].context.distance
+        for s in self.surface_list[1:idx]:
+            z = z + s.context.distance
         return z
 
-    def _check_available(self):
-        if self.surface in self.lens_group:
-            return
-        raise RuntimeError(
-            'The surface is not contained in the lens group referenced by its context object. '
-            'This may be because the surface has been removed from the lens group.')
 
-
-class Aperture(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
+class Aperture(_t.EnhancedModule, metaclass=abc.ABCMeta):
     """
     Base class for aperture shapes. Aperture refers to the region on a surface
     where rays can transmit. The region outside the aperture is assumed to be
@@ -181,17 +412,20 @@ class Aperture(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacl
             raise ValueError(f'Unknown sampling mode for {self.__class__.__name__}: {mode}')
         return meth(*args, **kwargs)
 
+    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
+        return {'type': self.__class__.__name__}
+
     @classmethod
     def from_dict(cls, d: dict):
         if cls is not Aperture:
             d.pop('type')
-            return cls(**d)
+            return cls(**d)  # default implementation of eponymous method
 
         ty = d['type']
         subs = utils.subclasses(cls)
         for sub in subs:
             if sub.__name__ == ty:
-                return cast(type[Aperture], sub).from_dict(d)
+                return typing.cast(type[Aperture], sub).from_dict(d)  # Calling eponymous method of subclass
         aperture_types = [sub.__name__ for sub in subs]
         raise RuntimeError(f'Unknown aperture type: {ty}. Available: {aperture_types}')
 
@@ -200,23 +434,23 @@ class CircularAperture(Aperture):
     """
     Circular aperture with radius :attr:`radius`.
 
-    :param radius: Radius of the aperture.
-    :type radius: float | Tensor
+    :param diameter: Diameter of the aperture.
+    :type diameter: float | Tensor
     """
 
-    def __init__(self, radius: Scalar):
+    def __init__(self, diameter: Scalar):
         super().__init__()
-        if radius <= 0:
+        if diameter <= 0:
             raise ValueError('radius must be positive')
 
         self.register_buffer('radius', None)
-        self.radius: Ts = scalar(radius)  #: Radius of the aperture.
+        self.radius: Ts = typing.scalar(diameter) / 2  #: Radius of the aperture.
 
     def evaluate(self, x: Ts, y: Ts) -> torch.BoolTensor:
-        return cast(torch.BoolTensor, x.square() + y.square() <= self.radius.square())
+        return typing.cast(torch.BoolTensor, x.square() + y.square() <= self.radius.square())
 
     def pass_ray(self, ray: BatchedRay) -> torch.BoolTensor:
-        return cast(torch.BoolTensor, ray.r2 <= self.radius.square())
+        return typing.cast(torch.BoolTensor, ray.r2 <= self.radius.square())
 
     def sample_random(self, n: int, sampling_curve: Callable[[Ts], Ts] = None) -> tuple[Ts, Ts]:
         r"""
@@ -248,10 +482,11 @@ class CircularAperture(Aperture):
 
         :param n: A pair of int representing :math:`(H, W)`.
         :type n: int | tuple[int, int]
+        :param bool mask_invalid: Whether to discard points outside the aperture. Default: ``True``.
         :return: Two 1D tensors of representing x and y coordinates of the points.
         :rtype: tuple[Tensor, Tensor]
         """
-        h, w = size2d(n)
+        h, w = typing.size2d(n)
         y, x = utils.grid(
             (h, w), (2 * self.radius / h, 2 * self.radius / w), symmetric=True,
             device=self.device, dtype=self.dtype
@@ -277,7 +512,7 @@ class CircularAperture(Aperture):
         :return: Two 1D tensors of representing x and y coordinates of the points.
         :rtype: tuple[Tensor, Tensor]
         """
-        n = size2d(n)
+        n = typing.size2d(n)
         zero = torch.tensor([0.], dtype=self.dtype, device=self.device)
         r = torch.linspace(0, self.radius * SAMPLE_LIMIT, n[0] + 1, device=self.device, dtype=self.dtype)
         r = [r[i].expand(i * n[1]) for i in range(1, n[0] + 1)]  # n[1]*n[0]*(n[0]+1)/2
@@ -308,24 +543,20 @@ class CircularAperture(Aperture):
         return r * theta.cos(), r * theta.sin()
 
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
-        return {
-            'type': self.__class__.__name__,
-            'radius': self._attr2dictitem('radius', keep_tensor),
-        }
-
-    def _delegate(self) -> Ts:
-        return self.radius
+        d = super().to_dict(keep_tensor)
+        d['radius'] = self._attr2dictitem('radius', keep_tensor)
+        return d
 
 
-class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metaclass=abc.ABCMeta):
+# TODO: ray validity check
+class Surface(_t.EnhancedModule, metaclass=abc.ABCMeta):
     r"""
     Base class for optical surfaces in a group of lens.
-    The position of a surface in a lens group is specified by a single z-coordinate,
-    which is called its *baseline*. Baseline of the first surface is 0.
 
-    The geometric shape of a surface is described by an equation
-    :math:`z=h(x,y)+z_\text{baseline}`, which has different forms
-    for each surface type. The function :math:`h`, called *surface function*,
+    The geometric shape of a surface is described by an equation in
+    :ref:`surface-local coordinate system <guide_optics_rt_slcs>`
+    :math:`z=h(x,y)`, which has different forms for each surface type.
+    The function :math:`h`, called *surface function*,
     is a 2D function of lateral coordinates :math:`(x,y)` which satisfies :math:`h(0,0)=0`.
     Note that the surface function also depends on the parameters of the surface implicitly.
 
@@ -335,20 +566,12 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
     surface function covers the aperture so an extended surface does not
     affect actual surface. If it cannot cover the aperture, however, the
     actual surface will be extended, which is usually undesired.
-    At present a warning will be issued if that case is detected.
 
-    This is subclass of :py:class:`torch.nn.Module`.
-
-    .. note::
-
-        All the quantities with length dimension is represented in meters.
-        They include value of coordinates, optical path length and wavelength, etc.
+    This is a subclass of :py:class:`torch.nn.Module`.
 
     :param material: Material following the surface. Either a :py:class:`~dnois.mt.Material`
         instance or a str representing the name of a registered material.
     :type material: :py:class:`~dnois.mt.Material` or str
-    :param distance: Distance between the surface and the next one.
-    :type distance: float or Tensor
     :param Aperture aperture: :class:`Aperture` of this surface.
     :param dict newton_config: Configuration for Newton's method.
         See :ref:`configuration_for_newtons_method` for details.
@@ -357,26 +580,27 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
     def __init__(
         self,
         material: mt.Material | str,
-        distance: Scalar,
         aperture: Aperture,
-        newton_config: dict[str, Any] = None
+        reflective: bool = False,
+        newton_config: dict[str, Any] = None,
+        *,
+        d: Scalar = None,
     ):
         super().__init__()
-        distance = scalar(distance)
-        if distance.item() < 0:
-            raise ValueError('distance must not be negative')
         if newton_config is None:
             newton_config = {}
         #: Material following the surface.
         self.material: mt.Material = material if isinstance(material, mt.Material) else mt.get(material)
-        #: Distance between the surface and the next one.
-        #: This is an optimizable parameter by default.
-        self.distance: nn.Parameter = nn.Parameter(distance)
         #: :class:`Aperture` of this surface.
         self.aperture: Aperture = aperture
-        #: The context object of the surface in a lens group.
-        #: This is created by the lens group object containing the surface.
+        #: The context object of the surface in a surface list.
+        #: This is created by the surface list object containing the surface.
         self.context: Context | None = None
+        #: Whether this surface reflects (rather than refracts) rays.
+        self.reflective: bool = reflective
+
+        if d is not None:
+            self._distance = typing.scalar(d, dtype=self.dtype, device=self.device)
 
         self._nt_max_iteration = newton_config.get('max_iteration', NT_MAX_ITERATION)
         self._nt_threshold = newton_config.get('threshold', NT_THRESHOLD)
@@ -445,8 +669,6 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
     def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
         """
         Returns the refracted rays of a group of incident rays ``ray``.
-        The directions of rays are determined by ``forward`` and the rays
-        with incorrect direction will be marked as invalid.
 
         :param BatchedRay ray: Incident rays.
         :param bool forward: Whether the incident rays propagate along positive-z direction.
@@ -454,15 +676,11 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
             A new :py:class:`~BatchedRay` object.
         :rtype: BatchedRay
         """
-        valid = self._prop_check(ray, forward)
-        ray = ray.update_valid(valid)
-
-        # magnitude = self._nt_threshold_strict / torch.finfo(ray.o.dtype).eps
-        # if torch.abs(ray.z - self.context.z).gt(magnitude).any():
-        #     new_z = self.context.z - magnitude if forward else self.context.z + magnitude
-        #     ray = ray.march_to(new_z, self.context.material_before.n(ray.wl, 'm'))
-
-        return self.refract(self.intercept(ray), forward)
+        ray = self.intercept(ray)
+        if self.reflective:
+            return self.reflect(ray)
+        else:
+            return self.refract(ray, forward)
 
     def intercept(self, ray: BatchedRay) -> BatchedRay:
         """
@@ -478,11 +696,13 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
         :rtype: BatchedRay
         """
         ray = ray.norm_d()
-        t = self._solve_t(ray)
+        t = self._solve_t(self.context.g2l_ray(ray))
         ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
+
+        ray_in_local = self.context.g2l_ray(ray)
         ray.update_valid_(
-            self.aperture.pass_ray(ray) &
-            (self._f(ray).abs() < self._nt_threshold_strict)
+            self.aperture.pass_ray(ray_in_local) &
+            (self._f(ray_in_local).abs() < self._nt_threshold_strict)
         )
         return ray
 
@@ -505,22 +725,7 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
         r"""
         Returns a new :py:class:`~BatchedRay` whose origins are identical to those
         of ``ray`` and directions are refracted by this surface.
-        Refracted directions are computed by following equation:
-
-        .. math::
-
-            \mathbf{d}_2=\mu\mathbf{d}_1+\left(
-                \sqrt{1-\mu^2\left(1-(\mathbf{n}\cdot\mathbf{d}_1)^2\right)}-
-                \mu\mathbf{n}\cdot\mathbf{d}_1
-            \right)\mathbf{n}
-
-        where :math:`\mathbf{d}_1` and :math:`\mathbf{d}_2` are unit vectors of
-        incident and refracted directions, :math:`\mu=n_1/n_2` is the ratio of
-        refractive indices and :math:`\mathbf{n}` is unit normal vector of the surface,
-        which is exactly :py:meth:`~normal`. Note that this equation applies only
-        to forward ray tracing.
-        The rays making the expression under the square root negative will be
-        marked as invalid.
+        See :meth:`dnois.refract` for more details.
 
         :param BatchedRay ray: Incident rays.
         :param bool forward: Whether the incident rays propagate along positive-z direction.
@@ -532,15 +737,32 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
         if self.context.material_before == self.material:
             return ray
 
-        normal = self.normal(ray.x, ray.y)
+        normal = self._optical_normal(ray.x, ray.y)
+        normal = self.context.l2g(normal, True)
         if forward:
-            miu = self.context.material_before.n(ray.wl, 'm') / self.material.n(ray.wl, 'm')
+            mu = self.context.material_before.n(ray.wl, 'm') / self.material.n(ray.wl, 'm')
         else:
-            miu = self.material.n(ray.wl, 'm') / self.context.material_before.n(ray.wl, 'm')
+            mu = self.material.n(ray.wl, 'm') / self.context.material_before.n(ray.wl, 'm')
             normal = -normal
-        refractive = base.refract(ray.d_norm, normal, miu.unsqueeze(-1))
+        refractive = base.refract(ray.d_norm, normal, mu)
         ray.d = refractive.nan_to_num(nan=0)
         ray.update_valid_(~refractive[..., 0].isnan()).norm_d_()
+        return ray
+
+    def reflect(self, ray: BatchedRay) -> BatchedRay:
+        r"""
+        Returns a new :py:class:`~BatchedRay` whose origins are identical to those
+        of ``ray`` and directions are reflected by this surface.
+        See :meth:`dnois.reflect` for more details.
+
+        :param BatchedRay ray: Incident rays.
+        :return: Reflected rays with origin on this surface. A new :py:class:`~BatchedRay` object.
+        :rtype: BatchedRay
+        """
+        ray = ray.clone(False)
+        normal = self._optical_normal(ray.x, ray.y)
+        normal = self.context.l2g(normal, True)
+        ray.d = base.reflect(ray.d_norm, normal)
         return ray
 
     def sample(self, mode: str, *args, **kwargs) -> Ts:
@@ -553,14 +775,15 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
         :rtype: Tensor
         """
         x, y = self.aperture.sample(mode, *args, **kwargs)
-        z = self.h_extended(x, y) + self.context.z
-        return torch.stack([x, y, z], dim=-1)
+        z = self.h_extended(x, y)
+        points = torch.stack([x, y, z], dim=-1)
+        points = self.context.l2g(points)
+        return points
 
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         return {
             'type': self.__class__.__name__,
             'material': self.material.name,
-            'distance': self._attr2dictitem('distance', keep_tensor),
             'aperture': self.aperture.to_dict(keep_tensor),
         }
 
@@ -569,20 +792,17 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
         if cls is not Surface:
             d.pop('type')
             d['aperture'] = Aperture.from_dict(d['aperture'])
-            return cls(**d)
+            return cls(**d)  # default implementation of eponymous method
 
         ty = d['type']
         subs = utils.subclasses(cls)
         for sub in subs:
             if sub.__name__ == ty:
-                return cast(type[Surface], sub).from_dict(d)
+                return typing.cast(type[Surface], sub).from_dict(d)  # calling eponymous method of subclass
         raise RuntimeError(f'Unknown surface type: {ty}. Available: {surface_types(True)}')
 
-    def _delegate(self) -> Ts:
-        return self.distance
-
     def _f(self, ray: BatchedRay) -> Ts:
-        return self.h_extended(ray.x, ray.y) + self.context.z - ray.z
+        return self.h_extended(ray.x, ray.y) - ray.z
 
     def _f_grad(self, ray: BatchedRay) -> Ts:
         phpx, phpy = self.h_grad_extended(ray.x, ray.y)
@@ -594,17 +814,10 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
         descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
         return descent
 
-    def _prop_check(self, ray: BatchedRay, forward: bool) -> Ts:
-        if forward:
-            valid = torch.logical_and(self._f(ray) >= 0, ray.d_z > 0)
-        else:
-            valid = torch.logical_and(self._f(ray) <= 0, ray.d_z < 0)
-        return valid
-
     def _solve_t(self, ray: BatchedRay) -> Ts:
-        # TODO: optimize
+        # the origin and direction of ray are defined in local coordinate system
         ray = ray.norm_d()
-        t = (self.context.z - ray.z) / ray.d_z
+        t = - ray.z / ray.d_z
         t0 = t
         cnt = 0  # equal to numbers of derivative computation
         new_ray = ray.clone(False)
@@ -626,10 +839,21 @@ class Surface(_t.TensorContainerMixIn, EnhancedModule, base.AsJsonMixIn, metacla
         # the second argument cannot be replaced by f_value because of computational graph
         return t - self._newton_descent(new_ray, self._f(new_ray))
 
+    # for surfaces like Fresnel
+    def _optical_normal(self, x: Ts, y: Ts) -> Ts:
+        return self.normal(x, y)
+
 
 class Planar(Surface):
-    def __init__(self, material: mt.Material | str, distance: Scalar, aperture: Aperture):
-        super().__init__(material, distance, aperture, None)
+    def __init__(
+        self,
+        material: mt.Material | str,
+        aperture: Aperture,
+        reflective: bool = False,
+        *,
+        d: Scalar = None
+    ):
+        super().__init__(material, aperture, reflective, None, d=d)
 
     def h(self, x: Ts, y: Ts) -> Ts:
         return self.new_zeros(torch.broadcast_shapes(x.shape, y.shape))
@@ -644,43 +868,47 @@ class Planar(Surface):
         return torch.zeros_like(x), torch.zeros_like(y)
 
     def intercept(self, ray: BatchedRay) -> BatchedRay:
-        new_ray = ray.march_to(self.context.z, self.context.material_before.n(ray.wl, 'm'))
-        new_ray = self.aperture(new_ray)
-        return new_ray
+        ray = ray.norm_d()
+        t = self._solve_t(self.context.g2l_ray(ray))
+        ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
+
+        ray_in_local = self.context.g2l_ray(ray)
+        ray.update_valid_(self.aperture.pass_ray(ray_in_local))
+        return ray
 
     def normal(self, x: Ts, y: Ts) -> Ts:
         return torch.stack([torch.zeros_like(x), torch.zeros_like(y), torch.ones_like(x)], -1)
 
     def _solve_t(self, ray: BatchedRay) -> Ts:
         ray = ray.norm_d()
-        return (self.context.z - ray.z) / ray.d_z
+        return - ray.z / ray.d_z
 
 
 class Stop(Planar):
-    def __init__(self, distance: Scalar, aperture: Aperture, move_ray: bool = True):
-        super().__init__('vacuum', distance, aperture)  # material is ignored
+    def __init__(self, aperture: Aperture, move_ray: bool = True, *, d: Scalar = None):
+        super().__init__('vacuum', aperture, False, d=d)  # material is ignored
         self._move_ray = move_ray
 
-    def forward(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
-        valid_prop = self._prop_check(ray, forward)
-
+    def intercept(self, ray: BatchedRay) -> BatchedRay:
+        ray = ray.norm_d()
+        ray_in_local = self.context.g2l_ray(ray)
+        t = self._solve_t(ray_in_local)
         if self._move_ray:
-            ray = ray.update_valid(valid_prop)
-            ray.march_to_(self.context.z, self.context.material_before.n(ray.wl, 'm'))
-            return self.aperture(ray)
+            ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
+            ray_in_local = self.context.g2l_ray(ray)
+            ray.update_valid_(self.aperture.pass_ray(ray_in_local))
+            return ray
         else:
-            ray = ray.norm_d()
-            t = (self.context.z - ray.z) / ray.d_z
-            new_o = ray.o + t * ray.d_norm
+            new_o = ray_in_local.o + t.unsqueeze(-1) * ray_in_local.d_norm
             valid_ap = self.aperture.evaluate(new_o[..., 0], new_o[..., 1])
-            return ray.update_valid(valid_prop & valid_ap)
+            return ray.update_valid(valid_ap)
 
     def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
         return ray.clone()
 
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         d = super().to_dict(keep_tensor)
-        d.pop('material')
+        del d['material']
         return d
 
     @property
@@ -709,9 +937,8 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
     :param material: Material following the surface. Either a :py:class:`~dnois.mt.Material`
         instance or a str representing the name of a registered material.
     :type material: :py:class:`~dnois.mt.Material` or str
-    :param distance: Distance between the surface and the next one.
     :param aperture: Aperture of this surface. If a float, the aperture will be a
-        :class:`CircularAperture` whose radius is the given value. Default: infinity.
+        :class:`CircularAperture` whose diameter is the given value. Default: infinity.
     :type aperture: Aperture or float
     :param dict newton_config: Configuration for Newton's method.
         See :ref:`configuration_for_newtons_method` for details.
@@ -720,15 +947,17 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
     def __init__(
         self,
         material: mt.Material | str,
-        distance: Scalar,
         aperture: Aperture | float = None,
-        newton_config: dict[str, Any] = None
+        reflective: bool = False,
+        newton_config: dict[str, Any] = None,
+        *,
+        d: Scalar = None
     ):
         if aperture is None:
             aperture = float('inf')
         if isinstance(aperture, float):
             aperture = CircularAperture(aperture)
-        super().__init__(material, distance, aperture, newton_config)
+        super().__init__(material, aperture, reflective, newton_config, d=d)
 
     @abc.abstractmethod
     def h_r2(self, r2: Ts) -> Ts:
@@ -818,7 +1047,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         return self.new_tensor(float('inf'))
 
     def _f(self, ray: BatchedRay) -> Ts:
-        return self.h_r2_extended(ray.r2) + self.context.z - ray.z
+        return self.h_r2_extended(ray.r2) - ray.z
 
     def _f_grad(self, ray: BatchedRay) -> Ts:
         phpx, phpy = self.h_grad_extended(ray.x, ray.y, ray.r2)
@@ -832,27 +1061,16 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
 
 
 class CircularStop(Stop, CircularSurface):
-    aperture: CircularAperture
-
-    def __init__(self, distance: Scalar, radius: Scalar):
-        aperture = CircularAperture(radius)
-        super().__init__(distance, aperture)
-
-    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
-        d = super().to_dict(keep_tensor)
-        del d['aperture']
-        d['radius'] = self.aperture._attr2dictitem('radius', keep_tensor)
-        return d
+    def __init__(self, aperture: Scalar, *, d: Scalar = None):
+        if isinstance(aperture, float):
+            aperture = CircularAperture(aperture)
+        super().__init__(aperture, d=d)
 
     def h_derivative_r2(self, r2: Ts) -> Ts:
         return torch.zeros_like(r2)
 
     def h_r2(self, r2: Ts) -> Ts:
         return torch.zeros_like(r2)
-
-    @classmethod
-    def from_dict(cls, d: dict):
-        return cls(d['distance'], d['radius'])
 
 
 class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMixIn):
@@ -875,6 +1093,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         self,
         surfaces: Sequence[Surface] = None,
         foremost_material: mt.Material | str = 'vacuum',
+        coaxial: bool = True,
     ):
         super().__init__()
         if surfaces is None:
@@ -888,6 +1107,8 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         self._stop_idx = None
         #: Material before the first surface.
         self.mt_head: mt.Material = foremost_material
+        #: Whether the surfaces are coaxial.
+        self.coaxial: bool = coaxial
 
         self.extend(surfaces)
 
@@ -1022,7 +1243,9 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         return {
             'surfaces': [s.to_dict(keep_tensor) for s in self._slist],
+            'contexts': [s.context.to_dict(keep_tensor) for s in self._slist],
             'foremost_material': self.mt_head.name,
+            'coaxial': self.coaxial,
         }
 
     @property
@@ -1060,7 +1283,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
 
         :type: Tensor
         """
-        return cast(Ts, sum(s.distance for s in self._slist[:-1]))
+        return typing.cast(Ts, sum(s.context.distance for s in self._slist[:-1]))
 
     @property
     def mt_tail(self) -> mt.Material:
@@ -1079,7 +1302,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
 
         :type: Tensor
         """
-        return cast(Ts, sum(s.distance for s in self._slist))
+        return typing.cast(Ts, sum(s.context.distance for s in self._slist))
 
     @property
     def stop_idx(self) -> int | None:
@@ -1104,22 +1327,25 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
     @classmethod
     def from_dict(cls, d: dict):
         d['surfaces'] = [Surface.from_dict(s) for s in d['surfaces']]
-        return cls(**d)
+        sl = cls(**d)
+        for i, ctx in enumerate(d['contexts']):
+            for k, v in ctx.items():
+                setattr(sl[i].context, k, v)
+        return sl
 
     def _welcome(self, *new: Surface):
         for surface in new:
             if self._force_surface and not isinstance(surface, Surface):
-                msg = f'An instance of {Surface.__name__} expected, got {type(surface)}'
-                raise TypeError(msg)
-            if surface.context is not None:
-                raise RuntimeError(f'A surface already contained in a lens group '
-                                   f'cannot be inserted to another one')
-            surface.context = Context(surface, self)
+                raise TypeError(f'An instance of {Surface.__name__} expected, got {type(surface).__name__}')
+            if self.coaxial:
+                surface.context = CoaxialContext(surface, self, getattr(surface, '_distance', None))
+            else:
+                surface.context = Context(surface, self)
 
         for s1 in self._slist:
             for s2 in new:
                 if id(s1) == id(s2):
-                    raise ValueError('Trying to add a surface into a lens group containing it')
+                    raise ValueError('Trying to add a surface into a surface list containing it')
 
     def _super_clear(self):
         for idx in range(len(self) - 1, -1, -1):
@@ -1139,4 +1365,4 @@ def surface_types(name_only: bool = False) -> list[type[Surface]] | list[str]:
     if name_only:
         return [sub.__name__ for sub in sub_list]
     else:
-        return cast(list, sub_list)
+        return typing.cast(list, sub_list)

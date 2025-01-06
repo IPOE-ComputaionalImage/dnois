@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from .param_transform import Transform
+from ..base import typing
 from ..base.serialize import AsJsonMixIn
 from ..base.typing import Callable, Ts, cast
 
@@ -12,6 +13,7 @@ __all__ = [
     'DtypeMixIn',
     'EnhancedModule',
     'ParamTransformModule',
+    'TensorAsDelegate',
     'TensorContainerMixIn',
     'WrapperModule',
 ]
@@ -238,43 +240,6 @@ class ParamTransformModule(nn.Module):
         return latent_name[8:]
 
 
-class EnhancedModule(ParamTransformModule, AsJsonMixIn):
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        original_to_dict = cls.__dict__.get('to_dict', None)
-        original_from_dict = cls.__dict__.get('from_dict', None)
-
-        if original_to_dict is not None:
-            original_to_dict = cast(Callable, original_to_dict)
-
-            def _wrapped_to_dict(self, keep_tensor: bool = True):
-                self: EnhancedModule
-                d = original_to_dict(self, keep_tensor)
-                tp = self.transformed_parameters
-                if len(tp) != 0:
-                    d['transformed_parameters'] = {k: (
-                        self._attr2dictitem(self._latent_name(k), keep_tensor),
-                        v[1].to_dict(keep_tensor)
-                    ) for k, v in tp.items()}
-                return d
-
-            cls.to_dict = wraps(original_to_dict)(_wrapped_to_dict)
-
-        if original_from_dict is not None:
-            if isinstance(original_from_dict, classmethod):
-                original_from_dict = original_from_dict.__wrapped__
-
-            def _wrapped_from_dict(clz, d: dict):
-                clz: type[EnhancedModule]
-                tp = d.pop('transformed_parameters', {})
-                obj = original_from_dict(clz, d)
-                for k, (param, transform) in tp.items():
-                    obj.register_latent_parameter(k, param, Transform.from_dict(transform))
-                return obj
-
-            cls.from_dict = classmethod(wraps(original_from_dict)(_wrapped_from_dict))
-
-
 def _check_consistency(attr: str, obj, ts: Ts, error: bool) -> bool:
     v1, v2 = getattr(obj, attr), getattr(ts, attr)
     if v1 != v2:
@@ -303,7 +268,22 @@ class TensorAsDelegate:
         return self._delegate().new_zeros(size, **kwargs)
 
     def _delegate(self) -> Ts:
-        raise TypeError(f'No delegate attribute specified for class {self.__class__.__name__}')
+        if not isinstance(self, nn.Module):
+            raise NotImplementedError(f'A subclass of {TensorAsDelegate.__name__} that is not derived from '
+                                      f'torch.nn.Module must implement {self._delegate.__name__} method')
+        if not hasattr(self, '_delegate_tensor'):
+            t = None
+            for p in self.parameters():
+                t = p
+                break
+            if t is None:
+                for b in self.buffers():
+                    t = b
+                    break
+            if t is None:
+                t = torch.tensor([])
+            self.register_buffer('_delegate_tensor', t.new_tensor([]), False)
+        return self._delegate_tensor
 
 
 class DeviceMixIn(TensorAsDelegate):
@@ -364,3 +344,75 @@ class TensorContainerMixIn(DeviceMixIn, DtypeMixIn):
 
     def _cast(self, ts: Ts) -> Ts:
         return ts.to(device=self.device, dtype=self.dtype)
+
+
+class FreezeParamMixIn(nn.Module):
+    def freeze(self, name: str | typing.Sequence[str] = None):
+        self.set_optimizable(name, False)
+
+    def unfreeze(self, name: str | typing.Sequence[str] = None):
+        self.set_optimizable(name, True)
+
+    def set_optimizable(self, name: str | typing.Sequence[str] = None, optimizable: bool = True):
+        if name is None:
+            for p in self.parameters():
+                p.requires_grad = optimizable
+        elif isinstance(name, str):
+            param = self.get_parameter(name)
+            param.requires_grad = optimizable
+        else:
+            for n in name:
+                param = self.get_parameter(n)
+                param.requires_grad = optimizable
+
+
+class EnhancedModule(
+    ParamTransformModule,
+    AsJsonMixIn,
+    TensorContainerMixIn,
+    FreezeParamMixIn,
+):
+    _writable_params = set()
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        original_to_dict = cls.__dict__.get('to_dict', None)
+        original_from_dict = cls.__dict__.get('from_dict', None)
+
+        if original_to_dict is not None:
+            original_to_dict = cast(Callable, original_to_dict)
+
+            def _wrapped_to_dict(self, keep_tensor: bool = True):
+                self: EnhancedModule
+                d = original_to_dict(self, keep_tensor)
+                tp = self.transformed_parameters
+                if len(tp) != 0:
+                    d['transformed_parameters'] = {k: (
+                        self._attr2dictitem(self._latent_name(k), keep_tensor),
+                        v[1].to_dict(keep_tensor)
+                    ) for k, v in tp.items()}
+                return d
+
+            cls.to_dict = wraps(original_to_dict)(_wrapped_to_dict)
+
+        if original_from_dict is not None:
+            if isinstance(original_from_dict, classmethod):
+                original_from_dict = original_from_dict.__wrapped__
+
+            def _wrapped_from_dict(clz, d: dict):
+                clz: type[EnhancedModule]
+                tp = d.pop('transformed_parameters', {})
+                obj = original_from_dict(clz, d)
+                for k, (param, transform) in tp.items():
+                    obj.register_latent_parameter(k, param, Transform.from_dict(transform))
+                return obj
+
+            cls.from_dict = classmethod(wraps(original_from_dict)(_wrapped_from_dict))
+
+    def __setattr__(self, key, value):  # TODO: deprecate
+        if key in self._writable_params:
+            self.register_parameter(key, nn.Parameter(
+                typing.scalar(value, dtype=self.dtype, device=self.device)  # TODO: scalar?
+            ))
+        else:
+            super().__setattr__(key, value)

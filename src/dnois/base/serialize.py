@@ -4,7 +4,7 @@ import warnings
 
 import torch
 
-from .typing import Any
+from .typing import Any, cast
 
 __all__ = [
     'AsDictMixIn',
@@ -25,6 +25,7 @@ class AsDictMixIn:
     @classmethod
     def from_dict(cls, d: dict):
         cls: type
+        d = cast(type[AsDictMixIn], cls)._pre_from_dict(d)
         return cls(**d)
 
     def _attr2dictitem(self, name: str, keep_tensor: bool = True):
@@ -42,6 +43,10 @@ class AsDictMixIn:
             attr = attr.tolist()
 
         return attr
+
+    @classmethod
+    def _pre_from_dict(cls, d: dict) -> dict:
+        return d.copy()
 
 
 class AsJsonMixIn(AsDictMixIn):

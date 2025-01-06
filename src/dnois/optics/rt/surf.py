@@ -1,18 +1,19 @@
 import abc
+import math
 
 import torch
 from torch import nn
 
 from . import _surf
 from ._surf import *
-from ... import mt, base
-from ...base.typing import Any, Ts, Scalar, Vector, scalar, pair
+from ... import mt, torch as _t
+from ...base.typing import Any, Ts, Scalar, Sequence, scalar, cast
 
 __all__ = [
     'Conic',
     'EvenAspherical',
     'Fresnel',
-    'PlanarPhase',
+    'PolynomialPhase',
     'Spherical',
     'Standard',
 ]
@@ -53,11 +54,13 @@ class _SphericalBase(CircularSurface, metaclass=abc.ABCMeta):  # docstring for S
     def __init__(
         self, roc: Scalar,
         material: mt.Material | str,
-        distance: Scalar,
         aperture: Aperture | float = None,
-        newton_config: dict[str, Any] = None
+        reflective: bool = False,
+        newton_config: dict[str, Any] = None,
+        *,
+        d: Scalar = None
     ):
-        super().__init__(material, distance, aperture, newton_config)
+        super().__init__(material, aperture, reflective, newton_config, d=d)
         self.roc: nn.Parameter = nn.Parameter(scalar(roc))  #: Radius of curvature.
 
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
@@ -123,11 +126,13 @@ class _ConicBase(_SphericalBase, metaclass=abc.ABCMeta):  # docstring for Conic
         self, roc: Scalar,
         conic: Scalar,
         material: mt.Material | str,
-        distance: Scalar,
         aperture: Aperture | float = None,
-        newton_config: dict[str, Any] = None
+        reflective: bool = False,
+        newton_config: dict[str, Any] = None,
+        *,
+        d: Scalar = None
     ):
-        super().__init__(roc, material, distance, aperture, newton_config)
+        super().__init__(roc, material, aperture, reflective, newton_config, d=d)
         self.conic: nn.Parameter = nn.Parameter(scalar(conic))  #: Conic coefficient.
 
     def h_derivative_r2(self, r2: Ts) -> Ts:
@@ -200,19 +205,21 @@ class EvenAspherical(_ConicBase):
     :param conic: Conic coefficient.
     :type conic: float or Tensor
     :param coefficients: Even aspherical coefficients.
-    :type coefficients: float, Sequence[float] or 1D Tensor
+    :type coefficients: Sequence[float | Tensor]
     """
 
     def __init__(
         self, roc: Scalar,
         conic: Scalar,
-        coefficients: Vector,
+        coefficients: Sequence[Scalar],
         material: mt.Material | str,
-        distance: Scalar,
         aperture: Aperture | float = None,
-        newton_config: dict[str, Any] = None
+        reflective: bool = False,
+        newton_config: dict[str, Any] = None,
+        *,
+        d: Scalar = None
     ):
-        super().__init__(roc, conic, material, distance, aperture, newton_config)
+        super().__init__(roc, conic, material, aperture, reflective, newton_config, d=d)
         for i, a in enumerate(coefficients):
             self.register_parameter(f'a{i + 1}', nn.Parameter(scalar(a)))
         self._n = len(coefficients)
@@ -236,7 +243,7 @@ class EvenAspherical(_ConicBase):
         return d
 
     @property
-    def coefficients(self):
+    def coefficients(self) -> list[Ts]:
         r"""
         Aspherical coefficients. Note that the element with index ``i``
         represents coefficient :math:`a_{i+1}`.
@@ -274,59 +281,48 @@ def _coordinate2index(x: Ts, n: int) -> tuple[Ts, Ts]:
     return idx.int().clamp(0, n - 1), x - x_cell
 
 
-class PlanarPhase(Planar):
-    """
-    This class is subject to change.
-    """
-
-    def __init__(
-        self,
-        size: float | tuple[float, float],
-        phase: Ts,  # small row index means small y coordinate
-        material: mt.Material | str,
-        distance: Scalar,
-        aperture: Aperture = None,
-        optimize_phase: bool = True,
-    ):
-        size = pair(size)
-        if aperture is None:
-            aperture = CircularAperture(min(size) / 2)
-        super().__init__(material, distance, aperture)
-
-        if phase.ndim != 2:
-            raise base.ShapeError(f'Shape of phase must be 2D, but got {phase.shape}')
-        #: Physical size of effective region of the surface, in vertical and horizontal directions.
-        self.size: tuple[float, float] = size
-        # no constraint on value of phase currently
-        self.phase = nn.Parameter(phase, requires_grad=optimize_phase)  #: Phase shift.
-
+class PlanarPhase(Planar, metaclass=abc.ABCMeta):
+    @abc.abstractmethod
     def phase_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
-        p = self.phase  # N_y x N_x
-        dy, dx = self.cell_size
-        grad_y = _diff(self.phase, dy, 0)  # N_y x N_x
-        grad_x = _diff(self.phase, dx, 1)  # N_y x N_x
+        r"""
+        Computes gradient of imparted phase shift :math:`(\pfrac{\phi}{x},\pfrac{\phi}{y})`.
 
-        y, x = y.clamp(-self.size[0], self.size[0]), x.clamp(-self.size[1], self.size[1])
-        y, x = y / dy, x / dx
-        y_idx, y_bias = _coordinate2index(y, p.size(0) - 1)  # row index for upper left
-        x_idx, x_bias = _coordinate2index(x, p.size(1) - 1)  # col index for upper left
-        y_idx2, x_idx2 = y_idx + 1, x_idx + 1  # indices for lower right
-
-        # bilinear interpolation
-        y_w = torch.stack([0.5 - y_bias, 0.5 + y_bias], -1).unsqueeze(-2)  # ... x 1 x 2
-        x_w = torch.stack([0.5 - x_bias, 0.5 + x_bias], -1).unsqueeze(-1)  # ... x 2 x 1
-        grad_y_points = torch.stack([
-            torch.stack([grad_y[y_idx, x_idx], grad_y[y_idx, x_idx2]], -1),
-            torch.stack([grad_y[y_idx2, x_idx], grad_y[y_idx2, x_idx2]], -1),
-        ], -1)  # ... x 2 x 2
-        grad_x_points = torch.stack([
-            torch.stack([grad_x[y_idx, x_idx], grad_x[y_idx, x_idx2]], -1),
-            torch.stack([grad_x[y_idx2, x_idx], grad_x[y_idx2, x_idx2]], -1),
-        ], -1)  # ... x 2 x 2
-        return (y_w @ grad_x_points @ x_w).squeeze(-2, -1), (y_w @ grad_y_points @ x_w).squeeze(-2, -1)
+        :param Tensor x: x coordinate. A tensor of shape `(...)`.
+        :param Tensor y: y coordinate. A tensor of shape `(...)`.
+        :return: Gradient. A tensor of shape `(..., 2)`.
+        :rtype: tuple[Tensor, Tensor]
+        """
+        pass
 
     def refract(self, ray: BatchedRay, forward: bool = True) -> BatchedRay:
-        ray = ray.clone(False).norm_d_()
+        r"""
+        Refracts rays with direction :math:`\mathbf{d}=(d_x,d_y,d_z)`
+        according to generalized Snell's law [#gsl]_:
+
+        .. math::
+            \left\{\begin{array}{l}
+            n_2d_x'=n_1d_x+\frac{\lambda}{2\pi}\pfrac{\phi}{x}(x_0,y_0)\\
+            n_2d_y'=n_1d_y+\frac{\lambda}{2\pi}\pfrac{\phi}{y}(x_0,y_0)\\
+            d_z'=\sqrt{1-d_x'^2-d_y'^2}
+            \end{array}\right.
+
+        where :math:`\mathbf{d'}=(d_x',d_y',d_z')` is direction of refractive ray,
+        :math:`n_1` and :math:`n_2` are refractive indices before and behind this surface,
+        :math:`\lambda` is the wavelength in vacuum, :math:`\phi` is imparted phase
+        and :math:`(x_0,y_0)` is the ray-surface intersection. Both direction vectors
+        have length 1.
+
+        :param BatchedRay ray: Incident rays.
+        :param bool forward: Whether the incident rays propagate along positive-z direction.
+        :return: Refracted rays with origin on this surface.
+            A new :py:class:`~BatchedRay` object.
+        :rtype: BatchedRay
+
+        .. [#gsl] Yu, N., Genevet, P., Kats, M. A., Aieta, F., Tetienne, J. P.,
+            Capasso, F., & Gaburro, Z. (2011). Light propagation with phase discontinuities:
+            generalized laws of reflection and refraction. science, 334(6054), 333-337.
+        """
+        ray = ray.norm_d()
         n1 = self.context.material_before.n(ray.wl, 'm')
         n2 = self.material.n(ray.wl, 'm')
         inv_k = ray.wl / (2 * torch.pi)
@@ -335,19 +331,122 @@ class PlanarPhase(Planar):
         ndx = (n1 * ray.d_x + inv_k * phase_x) / n2
         ndy = (n1 * ray.d_y + inv_k * phase_y) / n2
         ndz2 = 1 - ndx.square() - ndy.square()
-        new_d = torch.stack([ndx, ndy, ndz2.clamp(min=0).sqrt()], dim=-1)
+        new_d = torch.stack([ndx, ndy, ndz2.relu().sqrt()], dim=-1)
 
         ray.d = new_d
         ray._d_normed = True
         ray.update_valid_(ndz2 >= 0)
         return ray
 
-    def to_dict(self, keep_tensor=True) -> dict[str, Any]:
-        raise NotImplementedError()
+
+def _term_grad(x_exp: int, y_exp: int, x: Ts, y: Ts) -> Ts:
+    # This function is intended to compute partial derivative correctly
+    # when exp is 0 or 1 and there is 0 in x or y
+    if x_exp == 0:  # y ** y_exp
+        return torch.zeros_like(y)
+    elif x_exp == 1:  # x * y ** y_exp
+        return torch.ones_like(x) if y_exp == 0 else y.pow(y_exp)
+    elif y_exp == 0:  # x ** x_exp
+        return x_exp * x.pow(x_exp - 1)
+    else:  # x ** x_exp * y ** y_exp
+        return x_exp * x.pow(x_exp - 1) * y.pow(y_exp)
+
+
+def _rect_grad(i: int, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+    # If k is an integer, its ceiling may be k+1 rather than k due to floating point error
+    # so decrease i a little to avoid this problem
+    fi = i - 1e-5
+    k = (math.sqrt(9 + 8 * fi) - 3) / 2
+    k = int(math.ceil(k))
+    lb = (k - 1) * (k + 2) // 2
+    y_exp = i - lb - 1
+    x_exp = k - y_exp
+    return _term_grad(x_exp, y_exp, x, y), _term_grad(y_exp, x_exp, y, x)
+
+
+class PolynomialPhase(PlanarPhase, CircularSurface):
+    r"""
+    A planar surface imparting a phase shift to incident rays, parameterized as follows:
+
+    .. math::
+
+        \phi(r)=\sum_{i=1}^n a_i r^{2i}+\sum_{i=1}^m b_i p_i(x,y)
+
+    where :math:`r=\sqrt{x^2+y^2}`. :math:`p_i` is the :math:`i`-th polynomial
+    of :math:`(x,y)`, i.e. :math:`x`, :math:`y`, :math:`x^2`, :math:`xy`,
+    :math:`y^2`, :math:`x^3` and so on.
+
+    See :py:class:`CircularSurface` for descriptions of more parameters.
+
+    :param a: Radial coefficients :math:`a_1,\ldots,a_n`.
+    :type a: Sequence[float | Tensor]
+    :param b: Rectangular coefficients :math:`b_1,\ldots,b_m`.
+    :type b: Sequence[float | Tensor]
+    """
+
+    def __init__(
+        self,
+        a: Sequence[Scalar],
+        b: Sequence[Scalar],
+        material: mt.Material | str,
+        aperture: Aperture | float = None,
+        reflective: bool = False,
+        *,
+        d: Scalar = None
+    ):
+        CircularSurface.__init__(self, material, aperture, reflective, d=d)
+
+        for i, _a in enumerate(a):
+            self.register_parameter(f'a{i + 1}', nn.Parameter(scalar(_a)))
+        self.n: int = len(a)  #: Number of radial coefficients :math:`n`.
+        for i, _b in enumerate(b):
+            self.register_parameter(f'b{i + 1}', nn.Parameter(scalar(_b)))
+        self.m: int = len(b)  #: Number of rectangular coefficients :math:`m`.
+
+    def h_r2(self, r2: Ts) -> Ts:
+        return torch.zeros_like(r2)
+
+    def h_derivative_r2(self, r2: Ts) -> Ts:
+        return torch.zeros_like(r2)
+
+    def phase_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        double_phase_grad_r2 = self._radial_phase_grad_r2(x.square() + y.square()) * 2
+        rect_grad_x, rect_grad_y = self._rect_phase_grad(x, y)
+        return double_phase_grad_r2 * x + rect_grad_x, double_phase_grad_r2 * y + rect_grad_y
 
     @property
-    def cell_size(self) -> tuple[float, float]:
-        return 2 * self.size[0] / (self.phase.size(0) - 1), 2 * self.size[1] / (self.phase.size(1) - 1)
+    def a(self) -> list[nn.Parameter]:
+        r"""
+        Radial coefficients :math:`a_1,\ldots,a_n`. Note that the element
+        with index ``i`` represents coefficient :math:`a_{i+1}`.
+
+        :return: A list containing the coefficients.
+        :rtype: list[torch.nn.Parameter]
+        """
+        return [getattr(self, f'a{i + 1}') for i in range(self.n)]
+
+    @property
+    def b(self) -> list[nn.Parameter]:
+        r"""
+        Rectangular coefficients :math:`b_1,\ldots,b_m`. Note that the element
+        with index ``i`` represents coefficient :math:`b_{i+1}`.
+
+        :return: A list containing the coefficients.
+        :rtype: list[torch.nn.Parameter]
+        """
+        return [getattr(self, f'b{i + 1}') for i in range(self.m)]
+
+    def _radial_phase_grad_r2(self, r2: Ts) -> Ts:
+        c = self.coefficients
+        c = [(i + 1) * _c for i, _c in enumerate(c)]
+        return _t.polynomial(r2, c)
+
+    def _rect_phase_grad(self, x: Ts, y: Ts) -> tuple[Ts, Ts]:
+        term_grads = [_rect_grad(i, x, y) for i in range(1, self.m + 1)]
+        x_grads, y_grads = zip(*term_grads)
+        x_grad = sum(x_grad_i * b_i for x_grad_i, b_i in zip(x_grads, self.b))
+        y_grad = sum(y_grad_i * b_i for y_grad_i, b_i in zip(y_grads, self.b))
+        return cast(Ts, x_grad), cast(Ts, y_grad)
 
 
 class Fresnel(Planar, EvenAspherical):
@@ -359,31 +458,15 @@ class Fresnel(Planar, EvenAspherical):
 
     See :class:`EvenAspherical` for description of parameters.
     """
+    __init__ = EvenAspherical.__init__
 
-    def __init__(
-        self, roc: Scalar,
-        conic: Scalar,
-        coefficients: Vector,
-        material: mt.Material | str,
-        distance: Scalar,
-        aperture: Aperture | float = None,
-    ):
-        EvenAspherical.__init__(self, roc, conic, coefficients, material, distance, aperture)
+    def h_r2(self, r2: Ts) -> Ts:
+        return torch.zeros_like(r2)
 
-    def normal(self, x: Ts, y: Ts, curved: bool = True) -> Ts:
-        """
-        Overridden from :class:`Planar` to model refractive behavior of Fresnel surface.
+    def h_derivative_r2(self, r2: Ts) -> Ts:
+        return torch.zeros_like(r2)
 
-        :param Tensor x: Sames as that in :meth:`Planar.normal`.
-        :param Tensor y: Sames as that in :meth:`Planar.normal`.
-        :param bool curved: If ``True``, returns normal vector of latent curved surface.
-            Otherwise, this method acts identically to :meth:`Planar.normal`.
-        :return: Normal vector, a tensor whose last dimension is 3.
-        :rtype: Tensor
-        """
-        if not curved:
-            return super().normal(x, y)
-
+    def _optical_normal(self, x: Ts, y: Ts) -> Ts:
         r2 = x.square() + y.square()
         lim2 = self.geo_radius.square()
 

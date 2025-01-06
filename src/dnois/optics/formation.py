@@ -62,11 +62,13 @@ def depth_aware(
         for more details. Default: ``'linear'``.
     :type pad: int, tuple[int, int] or str
     :param bool occlusion_aware: Whether to use the occlusion-aware image formation algorithm
-        proposed in `Depth from Defocus with Learned Optics for Imaging and Occlusion-aware
-        Depth Estimation - Ikoma et al. <https://ieeexplore.ieee.org/abstract/document/9466261>`__.
-        Default: ``False``.
+        [#occ]_. Default: ``False``.
     :return: A tensor of shape :math:`(\cdots,H_o,W_o)`.
     :rtype: Tensor
+
+    .. [#occ] Ikoma, H., Nguyen, C. M., Metzler, C. A., Peng, Y., & Wetzstein, G. (2021, May).
+        Depth from defocus with learned optics for imaging and occlusion-aware depth estimation.
+        In 2021 IEEE International Conference on Computational Photography (ICCP) (pp. 1-12). IEEE.
     """
     if psf.size(-2) > obj.size(-2) or psf.size(-1) > obj.size(-1):
         raise base.ShapeError(f'Spatial dimension of PSF ({psf.shape[-2:]}) cannot '
