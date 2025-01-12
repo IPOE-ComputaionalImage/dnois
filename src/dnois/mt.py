@@ -466,14 +466,16 @@ def get(name: str, default_none: bool = False) -> Union[Material, None]:
     return m
 
 
-def register(material: Material):
+def register(material: Material, exist_ok: bool = False):
     """
     Add a new class of material into material library.
 
     :param Material material: The material instance.
+    :param bool exist_ok: If ``False``, raise :py:exc:`KeyError` if the material already exists.
+        Otherwise, overwrite the existing material. Default: ``False``.
     """
     name = material.name
-    if name in _lib:
+    if name in _lib and not exist_ok:
         raise KeyError(f'Material {name} already exists.')
     _lib[name] = material
 
@@ -536,8 +538,7 @@ def update(material: Material):
 
     :param Material material: The new material instance.
     """
-    remove(material.name, ignore_if_absent=True)
-    register(material)
+    register(material, exist_ok=True)
 
 
 def dispersion_types(name_only: bool = False) -> list[type[Material]] | list[str]:

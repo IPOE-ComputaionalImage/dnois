@@ -176,8 +176,8 @@ def refract(incident: Ts, normal: Ts, n1: Numeric, n2: Numeric = None) -> Ts:
         ``n1``, ``n2`` and ``mu`` can be negative.
     """
     ni = torch.sum(normal * incident, -1, True)  # inner product, ... x 1
-    if ni.lt(0).any():
-        raise exception.PhysicsError('The angle between normal vector and incident ray is not acute.')
+    # if ni.lt(0).any():
+    #     raise exception.PhysicsError('The angle between normal vector and incident ray is not acute.')
     n1 = _as_tensor(n1, ni).unsqueeze(-1)  # ... x 1
 
     if n2 is None:
@@ -205,6 +205,6 @@ def reflect(incident: Ts, normal: Ts) -> Ts:
     :rtype: Tensor
     """
     ni = torch.sum(normal * incident, -1, True)  # inner product, ... x 1
-    if ni.lt(0).any():
-        raise exception.PhysicsError('The angle between normal vector and incident ray is not acute.')
+    # if ni.lt(0).any():
+    #     raise exception.PhysicsError('The angle between normal vector and incident ray is not acute.')
     return incident - 2 * ni * normal

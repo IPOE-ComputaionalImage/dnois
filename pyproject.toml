@@ -20,3 +20,6 @@ license = { file = "LICENSE" }
 [tool.setuptools.packages.find]
 where = ["src"]
 exclude = ["dnois.optics.doe*"]
+
+[tool.setuptools.package-data]
+"dnois.base" = ["fl.csv"]

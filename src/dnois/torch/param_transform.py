@@ -10,8 +10,11 @@ __all__ = ['Transform']
 
 TransFn = Callable[[Ts], Ts]
 
-def _tensor(x:Numeric)->Ts:
-    if not isinstance(x, float) and not torch.is_tensor(x):
+
+def _ts_or_float(x: Numeric) -> Ts | float:
+    if isinstance(x, float) or torch.is_tensor(x):
+        return x
+    else:
         return torch.tensor(x)
 
 
@@ -152,7 +155,7 @@ class Transform(AsJsonMixIn):
         return Lt(limit)
 
     @staticmethod
-    def composite(*transforms:'Transform') -> 'Transform':
+    def composite(*transforms: 'Transform') -> 'Transform':
         r"""
         Chain some transformations into a single transformation.
         Resulted transformation is to apply all the transformations sequentially
@@ -178,7 +181,7 @@ class Transform(AsJsonMixIn):
 class Scale(Transform):
     def __init__(self, s: Numeric):
         super().__init__(cast(Callable, None))
-        self._s = _tensor(s)
+        self._s = _ts_or_float(s)
 
     def transform(self, x: Ts) -> Ts:
         return x * self._s
@@ -196,8 +199,8 @@ class Scale(Transform):
 class Range(Transform):
     def __init__(self, min_: Numeric, max_: Numeric):
         super().__init__(cast(Callable, None))
-        self._min = _tensor(min_)
-        self._range = _tensor(max_) - self._min
+        self._min = _ts_or_float(min_)
+        self._range = _ts_or_float(max_) - self._min
 
     def transform(self, x: Ts) -> Ts:
         return self._min + self._range * x.sigmoid()
@@ -217,7 +220,7 @@ class Range(Transform):
 class Gt(Transform):
     def __init__(self, limit: Numeric = None):
         super().__init__(cast(Callable, None))
-        self._limit = _tensor(limit)
+        self._limit = _ts_or_float(limit)
 
     def transform(self, x: Ts) -> Ts:
         return x.exp() if self._limit is None else self._limit + x.exp()
@@ -235,7 +238,7 @@ class Gt(Transform):
 class Lt(Transform):
     def __init__(self, limit: Numeric = None):
         super().__init__(cast(Callable, None))
-        self._limit = _tensor(limit)
+        self._limit = _ts_or_float(limit)
 
     def transform(self, x: Ts) -> Ts:
         return -x.exp() if self._limit is None else self._limit - x.exp()

@@ -57,6 +57,7 @@ class AsJsonMixIn(AsDictMixIn):
         :keyword kwargs: Keyword arguments passed to :func:`json.dumps`.
         :rtype: str
         """
+        kwargs.setdefault('indent', 2)
         return json.dumps(self.to_dict(False), **kwargs)
 
     def save_json(self, fp, **kwargs):
@@ -65,6 +66,7 @@ class AsJsonMixIn(AsDictMixIn):
 
         :keyword kwargs: Keyword arguments passed to :func:`json.dump`.
         """
+        kwargs.setdefault('indent', 2)
         return json.dump(self.to_dict(False), fp, **kwargs)
 
     @classmethod

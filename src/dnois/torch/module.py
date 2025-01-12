@@ -271,6 +271,7 @@ class TensorAsDelegate:
         if not isinstance(self, nn.Module):
             raise NotImplementedError(f'A subclass of {TensorAsDelegate.__name__} that is not derived from '
                                       f'torch.nn.Module must implement {self._delegate.__name__} method')
+        # register stub dynamically to avoid calling __init__
         if not hasattr(self, '_delegate_tensor'):
             t = None
             for p in self.parameters():

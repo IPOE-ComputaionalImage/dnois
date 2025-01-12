@@ -1,6 +1,6 @@
 # DNOIS: Differentiable Numeric Optical Imaging Simulation
 
-> :double_exclamation_mark: This project is under active development. Its content is subject to change.
+> :bangbang: This project is under active development. Its content is subject to change.
 
 ## Introduction
 ![Overview of DNOIS](assets/overview.svg "Overview of DNOIS")
@@ -14,3 +14,16 @@
 
 ## Documentation
 An online documentation of DNOIS is available [here](https://gjqaq.github.io/dnois/).
+
+## Usage
+
+### Packaging
+```shell
+python -m build
+```
+
+### Build documentation
+```shell
+cd docs
+make html
+```

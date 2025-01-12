@@ -9,10 +9,7 @@ from .ray import BatchedRay
 from ..system import RenderingOptics
 from ... import scene as _sc, base, utils, fourier, torch as _t
 from ...base import typing
-from ...base.typing import (
-    Ts, Any, Size2d, Vector, Scalar, Self, PsfCenter,
-    scalar
-)
+from ...base.typing import Ts, Any, Size2d, Vector, Scalar, Self, PsfCenter
 from ...sensor import Sensor
 
 __all__ = [
@@ -22,6 +19,8 @@ __all__ = [
 DEFAULT_FIND_CHIEF_SAMPLES: int = 101
 DEFAULT_SAMPLES: int = 512
 FOV_THRESHOLD4CHIEF_RAY = math.radians(0.01)
+
+_PsfType = typing.Literal['inc_rect', 'inc_gaussian', 'coh_kirchoff', 'coh_huygens', 'coh_fraunhofer']
 
 
 def _check_arg(arg: Any, n1: str, n2: str):
@@ -83,22 +82,22 @@ class CoaxialRayTracing(RenderingOptics):
 
     See :class:`~dnois.optics.RenderingOptics` for descriptions of more parameters.
 
-    .. note::
-        Rays are sampled on the first surface in a system to calculate PSF. As a result,
-        ``sampling_mode`` and ``sampling_args`` must be applicable to its aperture type.
+    :param CoaxialSurfaceList surfaces: Surface list object.
+    :param str psf_type: The way to calculate PSF. Default: ``inc_rect``.
 
-    :param str psf_type: The way to calculate PSF. Default: ``simple_incoherent``.
-
-        ``simple_incoherent``
+        ``inc_rect``
             TODO
 
-        ``coherent_kirchoff``
+        ``inc_gaussian``
             TODO
 
-        ``coherent_huygens``
+        ``coh_kirchoff``
             TODO
 
-        ``wavefront_ft``
+        ``coh_huygens``
+            TODO
+
+        ``coh_fraunhofer``
             TODO
     :param str psf_center: The way to determine centers of computed PSFs.
 
@@ -110,11 +109,9 @@ class CoaxialRayTracing(RenderingOptics):
 
         ``'chief'``
             PSFs are centered around the intersections of corresponding chief rays and image plane.
-    :param str sampling_mode: Mode for sampling rays used in simple incoherent PSF calculation.
-        See :class:`~surf.Surface.sample` for more details. Default: ``'random'``.
-    :param Any sampling_args: Arguments to pass to the sampling method specified by ``sampling_mode``.
-        See :class:`~surf.Surface.sample` for more details. Default: ``(64, )``.
-    :param bool vignette: Whether to simulate vignette for ``'simple_incoherent'`` PSF.
+    :param Callable sampler: A callable object whose signature is described by
+        :meth:`dnois.optics.rt.Aperture.sampler`. This is typically created by this method as well.
+    :param bool vignette: Whether to simulate vignette for ``'inc_rect'`` PSF. Default: ``False``.
     :param int coherent_tracing_samples: Number of samples in two directions
         for coherent tracing. Default: 512.
     :param str coherent_tracing_sampling_pattern: Sampling pattern for coherent tracing.
@@ -123,38 +120,38 @@ class CoaxialRayTracing(RenderingOptics):
     """
     _inherent = RenderingOptics._inherent + ['surfaces']
     _external = RenderingOptics._external + [
-        'psf_type', 'psf_center', 'sampling_mode', 'sampling_args',
+        'psf_type', 'psf_center',
         'vignette', 'coherent_tracing_samples', 'coherent_tracing_sampling_pattern'
     ]
 
+    PsfType = _PsfType
+
     def __init__(
         self,
-        surfaces: surf.SurfaceList,
+        surfaces: surf.CoaxialSurfaceList,
         image_distance: float,
         sensor: Sensor = None,
-        psf_type: str = 'simple_incoherent',
+        psf_type: _PsfType = 'inc_rect',
         psf_center: PsfCenter = 'linear',
-        sampling_mode: str = 'random',
-        sampling_args: Any = (64,),
-        vignette: bool = True,
+        sampler: surf.Sampler = None,
+        vignette: bool = False,
         coherent_tracing_samples: int = 512,
         coherent_tracing_sampling_pattern: str = 'quadrapolar',
         **kwargs
     ):
-        if not surfaces.coaxial:
-            raise RuntimeError(f'The surface list object passed to {self.__class__.__name__} must be coaxial')
-
         super().__init__(image_distance, sensor, **kwargs)
-        self.surfaces: surf.SurfaceList = surfaces  #: Surface list.
-        self.psf_type: str = psf_type  #: See :class:`CoaxialRayTracing`.
+        self.surfaces: surf.CoaxialSurfaceList = surfaces  #: Surface list.
+        self.psf_type: _PsfType = psf_type  #: See :class:`CoaxialRayTracing`.
         self.psf_center: PsfCenter = psf_center  #: See :class:`CoaxialRayTracing`.
-        self.sampling_mode: str = sampling_mode  #: See :class:`CoaxialRayTracing`.
-        self.sampling_args: Any = sampling_args  #: See :class:`CoaxialRayTracing`.
+        self.sampler: surf.Sampler = sampler  #: See :class:`CoaxialRayTracing`.
         self.vignette: bool = vignette  #: See :class:`CoaxialRayTracing`.
         #: See :class:`CoaxialRayTracing`.
         self.coherent_tracing_samples: int = coherent_tracing_samples
         #: See :class:`CoaxialRayTracing`.
         self.coherent_tracing_sampling_pattern: str = coherent_tracing_sampling_pattern
+
+        if self.sampler is None:
+            self.sampler = self.surfaces.first.aperture.sampler('random', 256)
 
     def pointwise_render(
         self,
@@ -163,7 +160,7 @@ class CoaxialRayTracing(RenderingOptics):
         wl: Vector = None,
         depth: Vector | tuple[Ts, Ts] = None,
         psf_size: Size2d = None,
-        psf_type: str = None,
+        psf_type: _PsfType = None,
         psf_center: PsfCenter = None,
         x_symmetric: bool = None,
         y_symmetric: bool = None,
@@ -186,7 +183,8 @@ class CoaxialRayTracing(RenderingOptics):
             return self._direct_pw_render(scene, wl, depth, **kwargs)
         else:
             return super().pointwise_render(
-                scene, wl, depth, psf_size, psf_center=psf_center, psf_type=psf_type, **kwargs
+                scene, wl, depth, psf_size, x_symmetric, y_symmetric,
+                psf_center=psf_center, psf_type=psf_type, **kwargs
             )
 
     def cam2lens_z(self, depth: float | Ts) -> Ts:
@@ -261,8 +259,41 @@ class CoaxialRayTracing(RenderingOptics):
         :rtype: Tensor
         """
         xy_on_sensor = self.obj2tanfov(point) * self.reference.focal_length
-        xy_on_sensor[..., 1] = -xy_on_sensor[..., 1]
+        xy_on_sensor[..., 0] = -xy_on_sensor[..., 0]
         return xy_on_sensor
+
+    def trace_ray(self, ray: BatchedRay) -> BatchedRay:
+        """
+        Trace a group of rays through surfaces until the image plane.
+        If you want to trace rays until the last surface, call ``self.surfaces(ray)``.
+
+        :param BatchedRay ray: Rays to trace.
+        :return: Rays after tracing. Their origins are located at the image plane.
+        :rtype: BatchedRay
+        """
+        out_ray: BatchedRay = self.surfaces(ray)
+        ref_idx = self.surfaces.last.material.n(out_ray.wl, 'm')
+        return out_ray.march_to(self.surfaces.total_length, ref_idx)
+
+    def trace_point(self, point: Ts, wl: Vector, sampler: surf.Sampler = None) -> BatchedRay:
+        """
+        Trace a group of rays emitted from ``point`` through surfaces until the image plane.
+
+        :param Tensor point: Coordinate of points in
+            :ref:`camera's coordinate system <guide_imodel_cameras_coordinate_system>`.
+            A tensor of shape ``(..., 3)``.
+        :param wl: Wavelengths of rays. A float, a sequence of float or a tensor of shape ``(N_wl,)``.
+        :param Callable sampler: A callable object whose signature is described by
+            :meth:`dnois.optics.rt.Aperture.sampler`. This is typically created by this method as well.
+        :return: Rays after tracing. Their origins are located at the image plane.
+        :rtype: BatchedRay
+        """
+        sampler = self.pick('sampler', sampler)
+        sampled = self.surfaces.first.sample(sampler)  # N_spp x 3
+        d, _ = _make_direction(sampled, self.cam2lens(point).unsqueeze(-2))  # ... x N_spp|1 x 3
+        ray = BatchedRay(sampled, d.unsqueeze(-3), wl.unsqueeze(-1))  # ... x N_wl x N_spp x 3
+        out_ray = self.trace_ray(ray)  # ... x N_wl x N_spp
+        return out_ray
 
     @torch.no_grad()
     def focus_to_(self, depth: Scalar) -> Self:
@@ -271,19 +302,15 @@ class CoaxialRayTracing(RenderingOptics):
 
             This method is subject to change.
         """
-        depth = scalar(depth, dtype=self.dtype, device=self.device)
+        depth = typing.scalar(depth, dtype=self.dtype, device=self.device)
         z = self.cam2lens_z(depth)
         o = torch.stack((torch.zeros_like(z), torch.zeros_like(z), z))  # 3
-        points = self.surfaces.first.sample(
-            self.pick('sampling_mode'),
-            *self.pick('sampling_args')
-        )  # N_spp x 3
+        points = self.surfaces.first.sample(self.sampler)  # N_spp x 3
         d, _ = _make_direction(points, o, True)
         wl = self.wl.reshape(-1, 1)
         ray = BatchedRay(points, d, wl)  # N_wl x N_spp
-        ray.norm_d_()
 
-        out_ray = self._obj2img(ray)
+        out_ray = self.trace_ray(ray)
 
         # solve marching distance by least square
         t = -(out_ray.x * out_ray.d_x + out_ray.y * out_ray.d_y)
@@ -300,7 +327,7 @@ class CoaxialRayTracing(RenderingOptics):
         origins: Ts,
         size: Size2d = None,
         wl: Vector = None,
-        psf_type: str = None,
+        psf_type: _PsfType = None,
         psf_center: PsfCenter = None,
         **kwargs
     ) -> Ts:
@@ -311,64 +338,78 @@ class CoaxialRayTracing(RenderingOptics):
 
         _t.check_3d_vector(origins, f'origins in {self.psf.__qualname__}')
 
-        if psf_type == 'simple_incoherent':
-            return self._psf_simple_incoherent(origins, size, wl, psf_center, **kwargs)
-        elif psf_type == 'coherent_huygens':
+        if psf_type == 'inc_rect':
+            return self._psf_inc_rect(origins, size, wl, psf_center, **kwargs)
+        elif psf_type == 'inc_gaussian':
+            return self._psf_inc_gaussian(origins, size, wl, psf_center, **kwargs)
+        elif psf_type == 'coh_huygens':
             return self._psf_coherent(origins, size, wl, psf_center, False)
-        elif psf_type == 'coherent_kirchoff':
+        elif psf_type == 'coh_kirchoff':
             return self._psf_coherent(origins, size, wl, psf_center, True)
-        elif psf_type == 'wavefront_ft':
+        elif psf_type == 'coh_fraunhofer':
             return self._psf_from_wavefront(origins, size, wl, psf_center, **kwargs)
         else:
             raise ValueError(f'Unknown PSF type: {psf_type}')
 
-    def entrance_pupil_probe(self, origin: Ts, wl: typing.Vector = None) -> tuple[Ts, Ts]:
-        """
-        .. attention::
+    def entrance_pupil(self) -> tuple[Ts, Ts]:
+        stop = self.surfaces.stop
+        if stop is None:
+            raise NotImplementedError()
+        ap = stop.aperture
+        if not isinstance(ap, surf.CircularAperture):
+            raise NotImplementedError()
+        idx = stop.ctx.index
+        if idx != 0:
+            raise NotImplementedError()
+        return self.surfaces.ctxs[idx].baseline, ap.radius
 
-            This method applies when the apertures of all surfaces are circular.
-
-        .. warning::
-
-            This method is subject to change.
-
-        Finds the diameter and z-value of the entrance pupil using *probe* method.
-
-        :param Tensor origin: Origin of probe rays, a tensor with shape ``(..., 3)``.
-            Its coordinate is defined in :ref:`lens' coordinate system <guide_optics_rt_lcs>`.
-        :param wl: Wavelengths.
-        :type wl: float | Sequence[float] | Tensor
-        :return: Diameter and z-value of the entrance pupil, a pair of tensors of shape ``(..., N_wl)``.
-        :rtype: tuple[Tensor, Tensor]
-        """
-        wl = self.pick('wl', wl)
-
-        self._check_circular()
-        _t.check_3d_vector(origin, f'origin in {self.entrance_pupil_probe.__qualname__}')
-        wl = wl.unsqueeze(-1)
-
-        origin = origin.unsqueeze(-2).unsqueeze(-3)  # ... x 1 x 1 x 3
-        d_parallel, _ = _make_direction(
-            torch.cat([self.new_tensor([0., 0.]), self.principal1.view(1)]), origin, True
-        )  # ... x 1 x 1 x 3
-
-        r = self.surfaces.first.aperture.radius  # scalar
-        edge_h = self.surfaces.first.h_extended(torch.zeros_like(r), r)  # scalar
-        r = r + torch.sqrt(d_parallel[..., 2].reciprocal().square() - 1) * edge_h  # ... x 1 x 1
-        axis_tmp = torch.linspace(-1, 1, find_chief_samples, device=self.device, dtype=self.dtype)
-        x, y = torch.meshgrid(axis_tmp, axis_tmp, indexing='ij')
-        x, y = x.flatten(), y.flatten()  # N_spp
-        points_pre = torch.stack([x, y, torch.zeros_like(x)], dim=-1)  # N_spp x 3
-        points_pre = points_pre * r.unsqueeze(-1)  # ... x 1 x N_spp x 3
-        ray = BatchedRay(points_pre, d_parallel, wl, d_normalized=True)  # ... x N_wl x N_spp
-        out_ray = self.surfaces(ray)
-
-        valid = out_ray.valid.broadcast_to(out_ray.shape)  # ... x N_wl x N_spp
-        xy_valid = ray.o[..., :2].masked_fill(~valid.unsqueeze(-1), float('nan'))
-        xy_mean = xy_valid.nanmean(-2, True)  # ... x N_wl x 1 x 2
-        points_chief = torch.cat([xy_mean, torch.zeros_like(xy_mean[..., [0]])], -1)  # ... x N_wl x 1 x 3
-        d_chief, l0_chief = _make_direction(points_chief, origin, True)  # ... x 1 x 1( x 3)
-        chief_ray = BatchedRay(points_chief, d_chief, wl, 0., d_normalized=True)  # ... x N_wl x 1
+    # def entrance_pupil_probe(self, origin: Ts, wl: typing.Vector = None) -> tuple[Ts, Ts]:
+    #     """
+    #     .. attention::
+    #
+    #         This method applies when the apertures of all surfaces are circular.
+    #
+    #     .. warning::
+    #
+    #         This method is subject to change.
+    #
+    #     Finds the diameter and z-value of the entrance pupil using *probe* method.
+    #
+    #     :param Tensor origin: Origin of probe rays, a tensor with shape ``(..., 3)``.
+    #         Its coordinate is defined in :ref:`lens' coordinate system <guide_optics_rt_lcs>`.
+    #     :param wl: Wavelengths.
+    #     :type wl: float | Sequence[float] | Tensor
+    #     :return: Diameter and z-value of the entrance pupil, a pair of tensors of shape ``(..., N_wl)``.
+    #     :rtype: tuple[Tensor, Tensor]
+    #     """
+    #     wl = self.pick('wl', wl)
+    #
+    #     self._check_circular()
+    #     _t.check_3d_vector(origin, f'origin in {self.entrance_pupil_probe.__qualname__}')
+    #     wl = wl.unsqueeze(-1)
+    #
+    #     origin = origin.unsqueeze(-2).unsqueeze(-3)  # ... x 1 x 1 x 3
+    #     d_parallel, _ = _make_direction(
+    #         torch.cat([self.new_tensor([0., 0.]), self.principal1.view(1)]), origin, True
+    #     )  # ... x 1 x 1 x 3
+    #
+    #     r = self.surfaces.first.aperture.radius  # scalar
+    #     edge_h = self.surfaces.first.h_extended(torch.zeros_like(r), r)  # scalar
+    #     r = r + torch.sqrt(d_parallel[..., 2].reciprocal().square() - 1) * edge_h  # ... x 1 x 1
+    #     axis_tmp = torch.linspace(-1, 1, find_chief_samples, device=self.device, dtype=self.dtype)
+    #     x, y = torch.meshgrid(axis_tmp, axis_tmp, indexing='ij')
+    #     x, y = x.flatten(), y.flatten()  # N_spp
+    #     points_pre = torch.stack([x, y, torch.zeros_like(x)], dim=-1)  # N_spp x 3
+    #     points_pre = points_pre * r.unsqueeze(-1)  # ... x 1 x N_spp x 3
+    #     ray = BatchedRay(points_pre, d_parallel, wl)  # ... x N_wl x N_spp
+    #     out_ray = self.surfaces(ray)
+    #
+    #     valid = out_ray.valid.broadcast_to(out_ray.shape)  # ... x N_wl x N_spp
+    #     xy_valid = ray.o[..., :2].masked_fill(~valid.unsqueeze(-1), float('nan'))
+    #     xy_mean = xy_valid.nanmean(-2, True)  # ... x N_wl x 1 x 2
+    #     points_chief = torch.cat([xy_mean, torch.zeros_like(xy_mean[..., [0]])], -1)  # ... x N_wl x 1 x 3
+    #     d_chief, l0_chief = _make_direction(points_chief, origin, True)  # ... x 1 x 1( x 3)
+    #     chief_ray = BatchedRay(points_chief, d_chief, wl, 0.)  # ... x N_wl x 1
 
     # @torch.no_grad()
     # def show_spot_diagram(self, fov: Vector = None, wl: Vector = None) -> plt.Figure:
@@ -406,7 +447,7 @@ class CoaxialRayTracing(RenderingOptics):
         fov: Vector = None,
         wl: Vector = None,
         spp: int = 10,
-    ) -> plt.Figure:
+    ) -> tuple[plt.Figure, plt.Axes]:
         """
         .. warning::
 
@@ -438,7 +479,7 @@ class CoaxialRayTracing(RenderingOptics):
         self._plot_rays(ax, ray, fov, wl)
 
         _plot_set_ax(ax, self.surfaces.total_length.item())
-        return fig
+        return fig, ax
 
     # This method is adapted from
     # https://github.com/TanGeeGo/ImagingSimulation/blob/master/PSF_generation/ray_tracing/difftrace/analysis.py
@@ -460,6 +501,16 @@ class CoaxialRayTracing(RenderingOptics):
         opd = chief_ray.march(-rs_roc, ref_idx).opl - ray.opl  # ... x N_wl x N_spp
         opd[~ray.valid] = float('nan')
         return ray, opd / wl.unsqueeze(-1)  # ... x N_wl x N_spp
+
+    def chief_ray(self, origin: Ts, wl: Vector = None) -> BatchedRay:
+        wl = typing.vector(wl, device=self.device, dtype=self.dtype)
+
+        ap_z, _ = self.entrance_pupil()
+        zero = torch.zeros_like(ap_z)
+        chief_point = torch.stack([zero, zero, ap_z])  # 3
+        d, _ = _make_direction(chief_point, origin, True)  # ... x 3
+        chief = BatchedRay(chief_point, d.unsqueeze(-2), wl)  # ... x N_wl
+        return chief
 
     # Optical parameters
     # =============================
@@ -506,11 +557,6 @@ class CoaxialRayTracing(RenderingOptics):
     # protected
     # ========================
 
-    def _obj2img(self, ray: BatchedRay) -> BatchedRay:
-        out_ray: BatchedRay = self.surfaces(ray)
-        ref_idx = self.surfaces.last.material.n(out_ray.wl, 'm')
-        return out_ray.march_to(self.surfaces.total_length, ref_idx)
-
     # This method is adapted from
     # https://github.com/TanGeeGo/ImagingSimulation/blob/master/PSF_generation/ray_tracing/difftrace/analysis.py
     @torch.no_grad()
@@ -546,7 +592,7 @@ class CoaxialRayTracing(RenderingOptics):
         x, y = x.flatten(), y.flatten()  # N_spp
         points_pre = torch.stack([x, y, torch.zeros_like(x)], dim=-1)  # N_spp x 3
         points_pre = points_pre * r.unsqueeze(-1)  # ... x 1 x N_spp x 3
-        ray = BatchedRay(points_pre, d_parallel, wl, d_normalized=True)  # ... x N_wl x N_spp
+        ray = BatchedRay(points_pre, d_parallel, wl)  # ... x N_wl x N_spp
         out_ray = self.surfaces(ray)
 
         valid = out_ray.valid.broadcast_to(out_ray.shape)  # ... x N_wl x N_spp
@@ -554,7 +600,7 @@ class CoaxialRayTracing(RenderingOptics):
         xy_mean = xy_valid.nanmean(-2, True)  # ... x N_wl x 1 x 2
         points_chief = torch.cat([xy_mean, torch.zeros_like(xy_mean[..., [0]])], -1)  # ... x N_wl x 1 x 3
         d_chief, l0_chief = _make_direction(points_chief, origin, True)  # ... x 1 x 1( x 3)
-        chief_ray = BatchedRay(points_chief, d_chief, wl, 0., d_normalized=True)  # ... x N_wl x 1
+        chief_ray = BatchedRay(points_chief, d_chief, wl, 0.)  # ... x N_wl x 1
 
         # mimicking np.nanmax and np.nanmin
         xy_min = xy_valid.nan_to_num(nan=float('inf')).amin(-2, True)
@@ -592,7 +638,7 @@ class CoaxialRayTracing(RenderingOptics):
             )  # ... x N_wl x N_spp'
         ref_idx = self.surfaces.mt_head.n(wl, 'm')
         # ... x N_wl x N_spp'
-        ray = BatchedRay(points_sample, d_sample, wl, l0 * ref_idx, d_normalized=True)
+        ray = BatchedRay(points_sample, d_sample, wl, l0 * ref_idx)
         return ray, chief_ray
 
     def _trace_opl_with_chief(
@@ -606,7 +652,7 @@ class CoaxialRayTracing(RenderingOptics):
         ray, chief_ray = self._generate_rays(self.cam2lens(origin), wl, samples, sampling_pattern)
 
         ray = self.surfaces(ray)
-        chief_ray = self._obj2img(chief_ray)
+        chief_ray = self.trace_ray(chief_ray)
         radial_offset = torch.sqrt(chief_ray.o[..., :2].square().sum(-1))
         d_proj = torch.sqrt(chief_ray.d[..., :2].square().sum(-1))
         rs_roc = radial_offset / d_proj  # ... x N_wl x 1
@@ -636,7 +682,7 @@ class CoaxialRayTracing(RenderingOptics):
             ax.plot(*list(zip(lowers[i], lowers[i + 1])), color='black', linewidth=1)
 
     def _plot_rays(self, ax, ray: BatchedRay, fov: Ts, wl: Ts):  # ray: N_fov x N_wl x N_spp
-        ray.norm_d_().broadcast_().march_to_(ray.new_tensor(0.))
+        ray.broadcast_().march_to_(ray.new_tensor(0.))
         colors = [utils.wl2rgb(_wl, output_format='hex') for _wl in wl.tolist()]
         alphas = _plot_fov_alphas(fov.numel())
         rays_record = []
@@ -654,8 +700,7 @@ class CoaxialRayTracing(RenderingOptics):
         scene: _sc.ImageScene,
         wl: Ts,
         depth: Ts | tuple[Ts, Ts],
-        sampling_mode: str,
-        sampling_args: tuple,
+        sampler: surf.Sampler,
         vignette: bool,
     ) -> Ts:
         self._check_scene(scene)
@@ -671,7 +716,7 @@ class CoaxialRayTracing(RenderingOptics):
         o = self.points_grid((n_h, n_w), depth_map, True)  # B x H x W x 3
         o = self.cam2lens(o)  # B x H x W x 3
 
-        points = self.surfaces.first.sample(sampling_mode, *sampling_args)  # N_spp x 3
+        points = self.surfaces.first.sample(sampler)  # N_spp x 3
         spp = points.size(0)
         o = o.unsqueeze(-2).unsqueeze(-5)
         d, _ = _make_direction(points, o, True)  # B x 1 x H x W x N_spp x 3
@@ -679,7 +724,7 @@ class CoaxialRayTracing(RenderingOptics):
         wl = wl.view(1, -1, 1, 1, 1)
         ray = BatchedRay(points, d, wl)  # B x N_wl x H x W x N_spp
 
-        out_ray = self._obj2img(ray)
+        out_ray = self.trace_ray(ray)
 
         x, y = -out_ray.x / self.sensor.pixel_size[1], out_ray.y / self.sensor.pixel_size[0]
         x, y = x + self.sensor.pixel_num[1] / 2, y + self.sensor.pixel_num[0] / 2
@@ -709,61 +754,65 @@ class CoaxialRayTracing(RenderingOptics):
         image = image[..., :-2, :-2] / spp
         return image
 
-    def _psf_simple_incoherent(
-        self,
-        origins: Ts,
-        size: tuple[int, int],
-        wl: Ts,
-        psf_center: PsfCenter,
-        sampling_mode: str = None,
-        sampling_args: Any = None,
-        vignette: bool = None,
-    ) -> Ts:
-        sampling_mode = self.pick('sampling_mode', sampling_mode)
-        sampling_args = self.pick('sampling_args', sampling_args)
-        vignette = self.pick('vignette', vignette)
-
-        sampled = self.surfaces.first.sample(sampling_mode, *sampling_args)  # N_spp x 3
-        n_spp = sampled.size(0)
-        d, _ = _make_direction(sampled, self.cam2lens(origins).unsqueeze(-2))  # ... x N_spp x 3
-        # ... x N_wl x N_spp x 3
-        ray = BatchedRay(sampled, d.unsqueeze(-3), wl.unsqueeze(-1))
-        ray.norm_d_()
-
-        out_ray = self._obj2img(ray)  # ... x N_wl x N_spp
-        out_ray.update_valid_(~out_ray.x.isnan() & ~out_ray.y.isnan())
-
+    def _find_xy_center(self, psf_center, origins, out_ray, wl):
         if psf_center == 'linear':
             xy_center = self.obj_proj_lens(origins)[..., None, None, :]  # ... x 1 x 1 x 2
         elif psf_center == 'mean':
             xy_center = out_ray.o[..., :2]  # ... x N_wl x N_spp x 2
-            weight = out_ray.valid.unsqueeze(-1)
-            xy_center = torch.sum(xy_center * weight, -2, True) / weight.sum(-2, True)  # ... x N_wl x 1 x 2
+            valid = out_ray.valid.unsqueeze(-1)  # ... x N_wl x N_spp x 1
+            xy_center = torch.where(valid, xy_center, 0).sum(-2, True) / valid.sum(-2, True)  # ... x N_wl x 1 x 2
+            xy_center = xy_center.mean(-3, True)  # ... x 1 x 1 x 2
+        elif psf_center == 'chief':
+            chief = self.chief_ray(origins, wl)  # ... x N_wl
+            out_chief = self.trace_ray(chief)
+            xy_center = out_chief.o[..., None, :2]  # ... x N_wl x 1 x 2
+            xy_center = xy_center.mean(-3, True)  # ... x 1 x 1 x 2
         else:
             raise ValueError(f'Unsupported PSF center type for simple incoherent PSF: {psf_center}')
+        return xy_center
 
+    def _psf_inc_rect(
+        self,
+        origins: Ts,  # ... x 3
+        size: tuple[int, int],
+        wl: Ts,  # N_wl
+        psf_center: PsfCenter,
+        sampler: surf.Sampler = None,
+        vignette: bool = None,
+    ) -> Ts:
+        sampler = self.pick('sampler', sampler)
+        vignette = self.pick('vignette', vignette)
+
+        out_ray = self.trace_point(origins, wl, sampler)  # ... x N_wl x N_spp
+        out_ray.update_valid_(~out_ray.x.isnan() & ~out_ray.y.isnan())  # TODO:?
+        n_spp = out_ray.shape[-1]
+
+        xy_center = self._find_xy_center(psf_center, self.cam2lens(origins), out_ray, wl)
         xy = out_ray.o[..., :2] - xy_center  # ... x N_wl x N_spp x 2
+
         x, y = xy[..., 0] / self.sensor.pixel_size[1], xy[..., 1] / self.sensor.pixel_size[0]  # ... x N_wl x N_spp
-        x, y = x + size[1] / 2, y + size[0] / 2
+        # if PSF size is odd, the center is N/2, relative positions are -N//2, ..., N//2
+        # if PSF size is even, the center is (N+1)/2, relative positions are -N//2, ..., N//2-1
+        x, y = x + size[1] // 2 + 0.5, y + size[0] // 2 + 0.5
         c_a, r_a = torch.floor(x.detach() + 0.5).long(), torch.floor(y.detach() + 0.5).long()
-        in_region = (c_a >= 0) & (c_a <= size[1]) & (r_a >= 0) & (r_a <= size[0])  # ... x N_wl x N_spp
-        c_a[~in_region] = 0
-        r_a[~in_region] = 0
+        in_region = c_a.ge(0) & c_a.le(size[1]) & r_a.ge(0) & r_a.le(size[0])  # ... x N_wl x N_spp
+        mask = out_ray.valid & in_region  # ... x N_wl x N_spp
+        c_a[~mask] = 0
+        r_a[~mask] = 0
         c_as, r_as = c_a - 1, r_a - 1
         w_c, w_r = c_a - x + 0.5, r_a - y + 0.5
         iw_c, iw_r = 1 - w_c, 1 - w_r
 
-        psf = self.new_zeros(in_region.shape[:-1] + (size[0] + 2, size[1] + 2))  # ... x N_wl x H x W
-        mask = out_ray.valid & in_region
+        psf = self.new_zeros(out_ray.shape[:-1] + (size[0] + 2, size[1] + 2))  # ... x N_wl x (H+2) x (W+2)
         pre_idx = [
-            _t.as1d(torch.arange(dim_size, device=self.device), in_region.ndim, i)
-            for i, dim_size in enumerate(in_region.shape[:-1])
+            _t.as1d(torch.arange(dim_size, device=self.device), mask.ndim, i)
+            for i, dim_size in enumerate(mask.shape[:-1])
         ]
         psf.index_put_(pre_idx + [r_as, c_as], torch.where(mask, w_c * w_r, 0), True)  # top left
         psf.index_put_(pre_idx + [r_a, c_as], torch.where(mask, w_c * iw_r, 0), True)  # bottom left
         psf.index_put_(pre_idx + [r_as, c_a], torch.where(mask, iw_c * w_r, 0), True)  # top right
         psf.index_put_(pre_idx + [r_a, c_a], torch.where(mask, iw_c * iw_r, 0), True)  # bottom right
-        psf = psf[..., :-2, :-2]
+        psf = psf[..., :-2, :-2]  # ... x N_wl x H x W
 
         if vignette:
             psf = psf / n_spp
@@ -773,13 +822,54 @@ class CoaxialRayTracing(RenderingOptics):
         psf = psf.flip(-1)
         return psf
 
+    def _psf_inc_gaussian(
+        self,
+        origins: Ts,  # ... x 3
+        size: tuple[int, int],
+        wl: Ts,  # N_wl
+        psf_center: PsfCenter,
+        sampler: surf.Sampler = None,
+    ) -> Ts:
+        sampler = self.pick('sampler', sampler)
+
+        out_ray = self.trace_point(origins, wl, sampler)  # ... x N_wl x N_spp
+        out_ray.update_valid_(~out_ray.x.isnan() & ~out_ray.y.isnan())  # TODO:?
+
+        xy_center = self._find_xy_center(psf_center, self.cam2lens(origins), out_ray, wl)
+        xy = out_ray.o[..., :2] - xy_center  # ... x N_wl x N_spp x 2
+        py, px = self.sensor.pixel_size
+        valid = xy[..., 0].abs().le(px * (size[1] / 2 + 5)) & xy[..., 1].abs().le(py * (size[0] / 2 + 5))
+        valid.logical_and_(out_ray.valid)  # ... x N_wl x N_spp
+
+        psf = self.new_empty(out_ray.shape[:-1] + size)  # ... x N_wl x H x W
+        ry, rx = utils.grid(size, self.sensor.pixel_size, dtype=self.dtype, device=self.device)
+        rxy = torch.stack([rx, ry], -1)  # H x W x 2
+        pixel_diag = math.sqrt(px ** 2 + py ** 2)
+        sigma = pixel_diag / 3
+        a, b = 1 / (math.sqrt(2 * math.pi) * sigma), -1 / (2 * sigma * sigma)
+        for i in range(psf.size(-2)):
+            for j in range(psf.size(-1)):
+                r2 = torch.square(rxy[i, j] - xy).sum(-1)  # ... x N_wl x N_spp
+                w = a * torch.exp(b * r2)  # ... x N_wl x N_spp
+                psf[..., i, j] = torch.where(valid, w, 0).sum(-1)  # ... x N_wl
+
+        psf = psf / psf.sum((-2, -1), True)
+        psf = psf.flip(-1)
+        return psf
+
     # This method is adapted from
     # https://github.com/TanGeeGo/ImagingSimulation/blob/master/PSF_generation/ray_tracing/difftrace/analysis.py
     def _psf_coherent(
-        self, origins: Ts, size: tuple[int, int], wl: Ts, psf_center: PsfCenter, oblique: bool
+        self,
+        origins: Ts,
+        size: tuple[int, int],
+        wl: Ts,
+        psf_center: PsfCenter,
+        oblique: bool,
+        samples: int = DEFAULT_SAMPLES,
     ) -> Ts:
         """This method is subject to change."""
-        chief_ray, ray, rs_roc, _ = self._trace_opl_with_chief(origins, wl)
+        chief_ray, ray, rs_roc, _ = self._trace_opl_with_chief(origins, wl, samples)
 
         lim = ((size[0] - 1) // 2, (size[1] - 1) // 2)
         # x and y should decrease when index gets large since:

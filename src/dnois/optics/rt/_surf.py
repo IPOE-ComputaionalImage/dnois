@@ -1,5 +1,6 @@
 import abc
 import collections.abc
+import functools
 
 import torch
 from torch import nn
@@ -23,8 +24,11 @@ __all__ = [
     'CircularAperture',
     'CircularStop',
     'CircularSurface',
+    'CoaxialContext',
+    'CoaxialSurfaceList',
     'Context',
     'Planar',
+    'Sampler',
     'Stop',
     'Surface',
     'SurfaceList',
@@ -339,6 +343,9 @@ class CoaxialContext(Context):
         return z
 
 
+Sampler = typing.Callable[[], tuple[Ts, Ts]]
+
+
 class Aperture(_t.EnhancedModule, metaclass=abc.ABCMeta):
     """
     Base class for aperture shapes. Aperture refers to the region on a surface
@@ -411,6 +418,17 @@ class Aperture(_t.EnhancedModule, metaclass=abc.ABCMeta):
         if meth is ...:
             raise ValueError(f'Unknown sampling mode for {self.__class__.__name__}: {mode}')
         return meth(*args, **kwargs)
+
+    def sampler(self, mode: str, *args, **kwargs) -> Sampler:
+        """
+        Returns a callable object that can be used to sample points on this aperture.
+        When it is called, it will call :meth:`sample` with given arguments and return its return value.
+        See :meth:`sample` for more details.
+
+        :return: A callable object that can be used to sample points on this aperture.
+        :rtype: Callable
+        """
+        return functools.partial(self.sample, mode, *args, **kwargs)
 
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         return {'type': self.__class__.__name__}
@@ -499,7 +517,7 @@ class CircularAperture(Aperture):
         else:
             return x, y
 
-    def sample_unipolar(self, n: Size2d) -> tuple[Ts, Ts]:
+    def sample_unipolar(self, n_radius: int = 6, n_angle: int = 6) -> tuple[Ts, Ts]:
         r"""
         Samples points on this aperture in a unipolar manner. Specifically, the aperture
         is divided into :math:`N_r` rings with equal widths and points are sampled on the
@@ -507,24 +525,23 @@ class CircularAperture(Aperture):
         contains :math:`2N_\theta` points ... and so on, plus a point at center.
         Thus, there are :math:`N_\theta N_r(N_r+1)/2+1` points in total.
 
-        :param n: A pair of int representing :math:`(N_r,N_\theta)`.
-        :type n: int | tuple[int, int]
+        :param int n_radius: Number of rings :math:`N_r`. Default: 6.
+        :param int n_angle: Level of points increase per ring :math:`N_\theta`. Default: 6.
         :return: Two 1D tensors of representing x and y coordinates of the points.
         :rtype: tuple[Tensor, Tensor]
         """
-        n = typing.size2d(n)
         zero = torch.tensor([0.], dtype=self.dtype, device=self.device)
-        r = torch.linspace(0, self.radius * SAMPLE_LIMIT, n[0] + 1, device=self.device, dtype=self.dtype)
-        r = [r[i].expand(i * n[1]) for i in range(1, n[0] + 1)]  # n[1]*n[0]*(n[0]+1)/2
-        r = torch.cat([zero] + r)  # n[1]*n[0]*(n[0]+1)/2+1
+        r = torch.linspace(0, self.radius * SAMPLE_LIMIT, n_radius + 1, device=self.device, dtype=self.dtype)
+        r = [r[i].expand(i * n_angle) for i in range(1, n_radius + 1)]  # n_t*n_r*(n_r+1)/2
+        r = torch.cat([zero] + r)  # n_t*n_r*(n_r+1)/2+1
         t = [
-            torch.arange(i * n[1], device=self.device, dtype=self.dtype) / (n[1] * i) * (2 * torch.pi)
-            for i in range(1, n[0] + 1)
+            torch.arange(i * n_angle, device=self.device, dtype=self.dtype) / (n_angle * i) * (2 * torch.pi)
+            for i in range(1, n_radius + 1)
         ]
         t = torch.cat([zero] + t)
         return r * t.cos(), r * t.sin()
 
-    def sample_diameter(self, n: int, theta: float | Ts) -> tuple[Ts, Ts]:
+    def sample_diameter(self, n: int = 64, theta: float | Ts = 0.) -> tuple[Ts, Ts]:
         """
         Samples points on diameter line segments of this aperture.
         Polar angle of the line is given by ``theta``.
@@ -544,7 +561,7 @@ class CircularAperture(Aperture):
 
     def to_dict(self, keep_tensor=True) -> dict[str, Any]:
         d = super().to_dict(keep_tensor)
-        d['radius'] = self._attr2dictitem('radius', keep_tensor)
+        d['diameter'] = self._attr2dictitem('radius', keep_tensor) * 2
         return d
 
 
@@ -695,7 +712,6 @@ class Surface(_t.EnhancedModule, metaclass=abc.ABCMeta):
         :return: Intercepted rays.
         :rtype: BatchedRay
         """
-        ray = ray.norm_d()
         t = self._solve_t(self.context.g2l_ray(ray))
         ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
 
@@ -737,16 +753,17 @@ class Surface(_t.EnhancedModule, metaclass=abc.ABCMeta):
         if self.context.material_before == self.material:
             return ray
 
-        normal = self._optical_normal(ray.x, ray.y)
+        xy_local = self.context.g2l(ray.o)[..., :2]
+        normal = self._optical_normal(xy_local[..., 0], xy_local[..., 1])
         normal = self.context.l2g(normal, True)
         if forward:
             mu = self.context.material_before.n(ray.wl, 'm') / self.material.n(ray.wl, 'm')
         else:
             mu = self.material.n(ray.wl, 'm') / self.context.material_before.n(ray.wl, 'm')
             normal = -normal
-        refractive = base.refract(ray.d_norm, normal, mu)
+        refractive = base.refract(ray.d, normal, mu)
         ray.d = refractive.nan_to_num(nan=0)
-        ray.update_valid_(~refractive[..., 0].isnan()).norm_d_()
+        ray.update_valid_(~refractive[..., 0].isnan())
         return ray
 
     def reflect(self, ray: BatchedRay) -> BatchedRay:
@@ -760,21 +777,43 @@ class Surface(_t.EnhancedModule, metaclass=abc.ABCMeta):
         :rtype: BatchedRay
         """
         ray = ray.clone(False)
-        normal = self._optical_normal(ray.x, ray.y)
+        xy_local = self.context.g2l(ray.o)[..., :2]
+        normal = self._optical_normal(xy_local[..., 0], xy_local[..., 1])
         normal = self.context.l2g(normal, True)
-        ray.d = base.reflect(ray.d_norm, normal)
+        ray.d = base.reflect(ray.d, normal)
         return ray
 
+    @typing.overload
     def sample(self, mode: str, *args, **kwargs) -> Ts:
+        pass
+
+    @typing.overload
+    def sample(self, sampler: Sampler) -> Ts:
+        pass
+
+    def sample(self, mode, *args, **kwargs) -> Ts:
         """
         Samples points on this surface. They are first sampled by :meth:`Aperture.sample`.
+        This method has two overloaded forms with same return value:
 
-        :param str mode: Sampling mode. See :meth:`Aperture.sample`.
+        .. function:: sample(self, mode: str, *args, **kwargs) -> Ts
+            :no-index:
+
+            :param str mode: Sampling mode. See :meth:`Aperture.sample`.
+
+        .. function:: sample(self, sampler: Sampler) -> Ts
+            :no-index:
+
+            :param Sampler sampler: Sampler function. See :meth:`Aperture.sampler`.
+
         :return: A tensor with shape ``(n, 3)`` where ``n`` is number of samples.
             ``3`` means 3D spatial coordinates.
         :rtype: Tensor
         """
-        x, y = self.aperture.sample(mode, *args, **kwargs)
+        if callable(mode):
+            x, y = typing.cast(Sampler, mode)()
+        else:
+            x, y = self.aperture.sample(mode, *args, **kwargs)
         z = self.h_extended(x, y)
         points = torch.stack([x, y, z], dim=-1)
         points = self.context.l2g(points)
@@ -786,6 +825,11 @@ class Surface(_t.EnhancedModule, metaclass=abc.ABCMeta):
             'material': self.material.name,
             'aperture': self.aperture.to_dict(keep_tensor),
         }
+
+    @property
+    def ctx(self) -> Context | None:
+        """Alias for :attr:`.context`.\n\n:type: Context or None"""
+        return self.context
 
     @classmethod
     def from_dict(cls, d: dict):
@@ -809,21 +853,20 @@ class Surface(_t.EnhancedModule, metaclass=abc.ABCMeta):
         return torch.stack((phpx, phpy, -torch.ones_like(phpx)), dim=-1)
 
     def _newton_descent(self, ray: BatchedRay, f_value: Ts) -> Ts:
-        derivative_value = torch.sum(ray.d_norm * self._f_grad(ray), dim=-1)
+        derivative_value = torch.sum(ray.d * self._f_grad(ray), dim=-1)
         descent = f_value / (derivative_value + self._nt_epsilon)
         descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
         return descent
 
     def _solve_t(self, ray: BatchedRay) -> Ts:
         # the origin and direction of ray are defined in local coordinate system
-        ray = ray.norm_d()
         t = - ray.z / ray.d_z
         t0 = t
         cnt = 0  # equal to numbers of derivative computation
         new_ray = ray.clone(False)
         with torch.no_grad():
             while True:
-                new_ray.o = ray.o + new_ray.d_norm * t.unsqueeze(-1)  # do not compute opl for root finder
+                new_ray.o = ray.o + new_ray.d * t.unsqueeze(-1)  # do not compute opl for root finder
                 f_value = self._f(new_ray)
                 if torch.all(f_value.abs() < self._nt_threshold) or cnt >= self._nt_max_iteration:
                     break
@@ -834,7 +877,7 @@ class Surface(_t.EnhancedModule, metaclass=abc.ABCMeta):
             t = t - t0  # trace back
 
         t = t + t0  # this is needed to compute gradient correctly
-        new_ray.o = ray.o + new_ray.d_norm * t.unsqueeze(-1)
+        new_ray.o = ray.o + new_ray.d * t.unsqueeze(-1)
 
         # the second argument cannot be replaced by f_value because of computational graph
         return t - self._newton_descent(new_ray, self._f(new_ray))
@@ -868,7 +911,6 @@ class Planar(Surface):
         return torch.zeros_like(x), torch.zeros_like(y)
 
     def intercept(self, ray: BatchedRay) -> BatchedRay:
-        ray = ray.norm_d()
         t = self._solve_t(self.context.g2l_ray(ray))
         ray = ray.march(t, self.context.material_before.n(ray.wl, 'm'))
 
@@ -880,7 +922,6 @@ class Planar(Surface):
         return torch.stack([torch.zeros_like(x), torch.zeros_like(y), torch.ones_like(x)], -1)
 
     def _solve_t(self, ray: BatchedRay) -> Ts:
-        ray = ray.norm_d()
         return - ray.z / ray.d_z
 
 
@@ -890,7 +931,6 @@ class Stop(Planar):
         self._move_ray = move_ray
 
     def intercept(self, ray: BatchedRay) -> BatchedRay:
-        ray = ray.norm_d()
         ray_in_local = self.context.g2l_ray(ray)
         t = self._solve_t(ray_in_local)
         if self._move_ray:
@@ -899,7 +939,7 @@ class Stop(Planar):
             ray.update_valid_(self.aperture.pass_ray(ray_in_local))
             return ray
         else:
-            new_o = ray_in_local.o + t.unsqueeze(-1) * ray_in_local.d_norm
+            new_o = ray_in_local.o + t.unsqueeze(-1) * ray_in_local.d
             valid_ap = self.aperture.evaluate(new_o[..., 0], new_o[..., 1])
             return ray.update_valid(valid_ap)
 
@@ -1054,7 +1094,7 @@ class CircularSurface(Surface, metaclass=abc.ABCMeta):
         return torch.stack((phpx, phpy, -torch.ones_like(phpx)), dim=-1)
 
     # def _newton_descent(self, ray: BatchedRay, f_value: Ts) -> Ts:
-    #     derivative_value = torch.sum(ray.d_norm * self._f_grad(ray), dim=-1)
+    #     derivative_value = torch.sum(ray.d * self._f_grad(ray), dim=-1)
     #     descent = f_value / (derivative_value + self._nt_epsilon)
     #     descent = torch.clip(descent, -self._nt_update_bound, self._nt_update_bound)
     #     return descent
@@ -1093,7 +1133,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         self,
         surfaces: Sequence[Surface] = None,
         foremost_material: mt.Material | str = 'vacuum',
-        coaxial: bool = True,
+        stop_idx: int = None,
     ):
         super().__init__()
         if surfaces is None:
@@ -1104,11 +1144,9 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         # This is needed to facilitate MutableSequence operations
         # because torch.nn.ModuleList saves submodules like a dict rather than list
         self._slist: list[Surface] = []
-        self._stop_idx = None
+        self._stop_idx = stop_idx
         #: Material before the first surface.
         self.mt_head: mt.Material = foremost_material
-        #: Whether the surfaces are coaxial.
-        self.coaxial: bool = coaxial
 
         self.extend(surfaces)
 
@@ -1245,7 +1283,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
             'surfaces': [s.to_dict(keep_tensor) for s in self._slist],
             'contexts': [s.context.to_dict(keep_tensor) for s in self._slist],
             'foremost_material': self.mt_head.name,
-            'coaxial': self.coaxial,
+            'stop_idx': self._stop_idx,
         }
 
     @property
@@ -1276,16 +1314,6 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         return len(self._slist) == 0
 
     @property
-    def length(self) -> Ts:
-        """
-        Returns the distance between baselines of the first and that of the last surfaces
-        as a 0D tensor.
-
-        :type: Tensor
-        """
-        return typing.cast(Ts, sum(s.context.distance for s in self._slist[:-1]))
-
-    @property
     def mt_tail(self) -> mt.Material:
         """
         Returns the material after the last surface.
@@ -1293,16 +1321,6 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         :type: :class:`~Material`
         """
         return self._slist[-1].material
-
-    @property
-    def total_length(self) -> Ts:
-        """
-        Returns the sum of :py:attr:`Surface.distance` of all the surfaces
-        as a 0D tensor.
-
-        :type: Tensor
-        """
-        return typing.cast(Ts, sum(s.context.distance for s in self._slist))
 
     @property
     def stop_idx(self) -> int | None:
@@ -1324,11 +1342,16 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         idx = self._stop_idx
         return None if idx is None else self._slist[idx]
 
+    @property
+    def ctxs(self) -> list[CoaxialContext]:
+        return [typing.cast(CoaxialContext, s.context) for s in self._slist]
+
     @classmethod
     def from_dict(cls, d: dict):
         d['surfaces'] = [Surface.from_dict(s) for s in d['surfaces']]
+        contexts = d.pop('contexts')
         sl = cls(**d)
-        for i, ctx in enumerate(d['contexts']):
+        for i, ctx in enumerate(contexts):
             for k, v in ctx.items():
                 setattr(sl[i].context, k, v)
         return sl
@@ -1337,10 +1360,7 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
         for surface in new:
             if self._force_surface and not isinstance(surface, Surface):
                 raise TypeError(f'An instance of {Surface.__name__} expected, got {type(surface).__name__}')
-            if self.coaxial:
-                surface.context = CoaxialContext(surface, self, getattr(surface, '_distance', None))
-            else:
-                surface.context = Context(surface, self)
+            surface.context = self._make_ctx(surface)
 
         for s1 in self._slist:
             for s2 in new:
@@ -1350,6 +1370,36 @@ class SurfaceList(nn.ModuleList, collections.abc.MutableSequence, base.AsJsonMix
     def _super_clear(self):
         for idx in range(len(self) - 1, -1, -1):
             super().__delitem__(idx)
+
+    def _make_ctx(self, s):
+        return Context(s, self)
+
+
+class CoaxialSurfaceList(SurfaceList):
+    """A subclass of :class:`SurfaceList` to contain coaxial surfaces."""
+
+    @property
+    def length(self) -> Ts:
+        """
+        Returns the distance between baselines of the first and that of the last surfaces
+        as a 0D tensor.
+
+        :type: Tensor
+        """
+        return typing.cast(Ts, sum(s.context.distance for s in self._slist[:-1]))
+
+    @property
+    def total_length(self) -> Ts:
+        """
+        Returns the sum of :py:attr:`Surface.distance` of all the surfaces
+        as a 0D tensor.
+
+        :type: Tensor
+        """
+        return typing.cast(Ts, sum(s.context.distance for s in self._slist))
+
+    def _make_ctx(self, s):
+        return CoaxialContext(s, self, getattr(s, '_distance', None))
 
 
 def surface_types(name_only: bool = False) -> list[type[Surface]] | list[str]:

@@ -1,5 +1,6 @@
 import abc
 import math
+import random
 import warnings
 
 import torch
@@ -329,8 +330,9 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
             return picker(value)
 
         # This is needed even when value is not None to ensure name represents a valid config item
-        attr = getattr(self, name, ...)
-        if attr is ...:
+        unset = object()
+        attr = getattr(self, name, unset)
+        if attr is unset:
             raise ValueError(f'Unknown external parameter for {self.__class__.__name__}: {name}')
         if value is None:
             return attr
@@ -525,6 +527,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
     def conv_render(
         self,
         scene: _sc.ImageScene,
+        fov: tuple[float, float] | Callable[[], tuple[float, float]] | str = None,
         wl: Vector = None,
         depth: Vector | tuple[Ts, Ts] = None,
         psf_size: Size2d = None,
@@ -539,6 +542,20 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
 
         :param scene: The scene to be imaged.
         :type scene: :class:`~dnois.scene.Scene`
+        :param fov: Corresponding FoV in degrees of the PSF used to render the scene.
+            The argument is interpreted depending on its type:
+
+            ``tuple[float, float]``
+                x and y FoV angles.
+
+            ``'random'``
+                Randomly draw a pair of x and y FoV angles in a uniform distribution.
+
+            ``Callable[[], tuple[float, float]]``
+                A callable that returns a pair of x and y FoV angles.
+                This is useful when non-uniform probability distribution is desired.
+
+            Default: ``(0., 0.)``
         :param wl: See :class:`RenderingOptics`. Default: :attr:`.wl`.
         :param depth: See :class:`RenderingOptics`. Default: :attr:`.depth`.
         :param psf_size: See :class:`RenderingOptics`. Default: :attr:`.psf_size`.
@@ -558,6 +575,13 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         wl = self.pick('wl', wl)
         depth = self.pick('depth', depth)
         psf_size = self.pick('psf_size', psf_size)
+        if fov is None:
+            fov = (0., 0.)
+        if isinstance(fov, str) and fov == 'random':
+            rm = self.reference
+            fov = (random.uniform(-rm.fov_half_x, rm.fov_half_x), random.uniform(-rm.fov_half_y, rm.fov_half_y))
+        elif callable(fov):
+            fov = cast(Callable, fov)()
 
         self._check_scene(scene)
         scene: _sc.ImageScene
@@ -582,7 +606,7 @@ class RenderingOptics(_t.TensorContainerMixIn, StandardOptics, base.AsJsonMixIn,
         else:
             if not (torch.is_tensor(depth) and depth.numel() == 1):
                 depth = torch.stack([self.random_depth(depth) for _ in range(scene.batch_size)])  # B(1)
-            obj_points = self.fovd2obj([(0., 0.)], depth)  # B(1) x 3
+            obj_points = self.fovd2obj([fov], depth)  # B(1) x 3
 
             psf = self.psf(obj_points, psf_size, wl, **kwargs)  # B(1) x N_wl x H_P x W_P
 

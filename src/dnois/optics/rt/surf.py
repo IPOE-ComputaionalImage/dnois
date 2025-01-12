@@ -83,7 +83,6 @@ class Spherical(_SphericalBase):
         return _spherical_der_wrt_r2(r2, 1 / self.roc)
 
     def _solve_t(self, ray: BatchedRay) -> Ts:
-        ray = ray.norm_d()
         if self.roc.isinf().all():
             return (self.context.z - ray.z) / ray.d_z
 
@@ -322,7 +321,6 @@ class PlanarPhase(Planar, metaclass=abc.ABCMeta):
             Capasso, F., & Gaburro, Z. (2011). Light propagation with phase discontinuities:
             generalized laws of reflection and refraction. science, 334(6054), 333-337.
         """
-        ray = ray.norm_d()
         n1 = self.context.material_before.n(ray.wl, 'm')
         n2 = self.material.n(ray.wl, 'm')
         inv_k = ray.wl / (2 * torch.pi)
@@ -458,7 +456,18 @@ class Fresnel(Planar, EvenAspherical):
 
     See :class:`EvenAspherical` for description of parameters.
     """
-    __init__ = EvenAspherical.__init__
+
+    def __init__(
+        self, roc: Scalar,
+        conic: Scalar,
+        coefficients: Sequence[Scalar],
+        material: mt.Material | str,
+        aperture: Aperture | float = None,
+        reflective: bool = False,
+        *,
+        d: Scalar = None
+    ):
+        EvenAspherical.__init__(self, roc, conic, coefficients, material, aperture, reflective, d=d)
 
     def h_r2(self, r2: Ts) -> Ts:
         return torch.zeros_like(r2)

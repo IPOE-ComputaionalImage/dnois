@@ -35,7 +35,7 @@ def _dtm_real(f1: Ts, f2: Ts, real: bool) -> bool:
 
 
 def _dtm_padding(padding: int | str, linear_value: int) -> int:
-    if padding == 'none':
+    if padding == 'none' or padding == 'circular':
         return 0
     elif padding == 'linear':
         return linear_value
@@ -176,7 +176,7 @@ def dconv(
     and :math:`f_2`, :math:`M` can be different. In that case,
     the shorter sequence will be padded first to match length of the longer one.
     Notably, it is circular convolution that is computed without additional padding
-    (if ``padding`` is ``0`` or ``none``). Specify ``padding`` as ``linear``
+    (if ``padding`` is ``0``, ``circular`` or ``none``). Specify ``padding`` as ``linear``
     or :math:`\min(N,M)-1` to compute linear convolution, with extra computational overhead.
     ``padding`` can also be set as a non-negative integer within this range for a balance.
     Note that the lengths of each dimension can be different.

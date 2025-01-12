@@ -42,6 +42,10 @@ def _check_shape_compatible(*tensors: Ts):
     torch.broadcast_shapes(*shapes)
 
 
+def _normalize(v: Ts) -> Ts:
+    return v / v.norm(dim=-1, keepdim=True)  # or torch.nn.functional.normalize (with eps) ?
+
+
 class NoValidRayError(RuntimeError):
     """Error meaning that valid rays vanish."""
     pass
@@ -84,8 +88,6 @@ class BatchedRay(_t.TensorContainerMixIn):
     :param init_phase: Initial phase. A tensor of shape ``(...)``.
         Default: do not record phase.
     :type init_phase: float or Tensor
-    :param bool d_normalized: Whether ``direction`` is already normalized to length 1.
-        Default: ``False``.
     """
 
     __slots__ = ('_d_normed', '_o_modified', '_ts',)
@@ -97,7 +99,6 @@ class BatchedRay(_t.TensorContainerMixIn):
         wl: float | Ts,
         init_opl: float | Ts = None,
         init_phase: float | Ts = None,
-        d_normalized: bool = False,
     ):
         if origin.size(-1) != 3 or direction.size(-1) != 3:
             raise ValueError(
@@ -114,13 +115,12 @@ class BatchedRay(_t.TensorContainerMixIn):
         _check_shape_compatible(origin[..., 0], direction[..., 0], wl, init_opl, init_phase)
         self._ts: dict[str, Ts | None] = {
             'o': origin,
-            'd': direction,
+            'd': _normalize(direction),
             'wl': wl,
             'v': torch.tensor(True, dtype=torch.bool, device=device),
             'opl': init_opl,
             'ph': init_phase,
         }
-        self._d_normed = d_normalized
         self._o_modified = False
 
     def __repr__(self):
@@ -253,7 +253,7 @@ class BatchedRay(_t.TensorContainerMixIn):
         """
         if not torch.is_tensor(t):
             t = self.new_tensor(t)
-        self.o = self._ts['o'] + self.d_norm * t.unsqueeze(-1)
+        self.o = self._ts['o'] + self.d * t.unsqueeze(-1)
         _opl, _ph = self.recording_opl, self.recording_phase
         if _opl or _ph:
             if n is None:
@@ -281,29 +281,8 @@ class BatchedRay(_t.TensorContainerMixIn):
         :type n: float or Tensor
         :return: self
         """
-        d_z = self.d_z if self._d_normed else self.d_norm[..., 2]
-        t = (z - self.z) / d_z
+        t = (z - self.z) / self.d_z
         return self.march_(t, n)
-
-    def norm_d(self) -> 'BatchedRay':
-        """
-        Out-of-place version of :py:meth:`.norm_d_`. Returns ``self`` if the direction
-        is already normalized, otherwise a new object.
-        """
-        return self if self._d_normed else self.clone().norm_d_()
-
-    def norm_d_(self) -> Self:
-        """
-        Normalize the direction in place and return ``self``.
-
-        :return: self
-        """
-        if self._d_normed:
-            return self
-        d = self._ts['d']
-        self._ts['d'] = d / d.norm(2, -1, True)
-        self._d_normed = True
-        return self
 
     def to_(self, *args, **kwargs) -> Self:
         """
@@ -391,9 +370,7 @@ class BatchedRay(_t.TensorContainerMixIn):
     def d(self) -> Ts:
         """
         The direction of the rays. The length or returned direction
-        (i.e. 2-norm along the last dimension) may not be normalized to 1.
-        Use :py:meth:`norm_d_` to normalize the direction or
-        :py:attr:`d_norm` to get a normalized copy of the direction.
+        (i.e. 2-norm along the last dimension) is normalized to 1.
 
         :type: Tensor
         """
@@ -404,19 +381,7 @@ class BatchedRay(_t.TensorContainerMixIn):
         if value.ndim < 1:
             raise base.ShapeError(f'Non-scalar tensor expected, got shape ({value.shape})')
         self._check_shape(value.shape[:-1], 'direction')
-        self._ts['d'] = self._cast(value)
-        self._d_normed = False
-
-    @property
-    def d_norm(self) -> Ts:
-        """
-        The normalized direction of the rays. See :py:attr:`.d`
-        for the difference between these two properties.
-
-        :type: Tensor
-        """
-        d = self._ts['d']
-        return d if self._d_normed else d / d.norm(2, -1, True)
+        self._ts['d'] = _normalize(self._cast(value))
 
     @property
     def wl(self) -> Ts:
